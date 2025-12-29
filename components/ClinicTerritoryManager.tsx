@@ -310,7 +310,7 @@ export default function ClinicTerritoryManager() {
 
       setClinics(merged);
 
-      const uniqueStates = [...new Set(merged.map(c => c.state).filter(Boolean))] as string[];
+      const uniqueStates = Array.from(new Set(merged.map(c => c.state).filter((s): s is string => Boolean(s))));
       setStates(uniqueStates.sort());
 
       displayAllClinics(merged);
@@ -695,8 +695,8 @@ export default function ClinicTerritoryManager() {
           total_exclusions: allExclusions.length,
           competing_clinics_excluded: nearbyClinicExclusions.length,
           boundary_exclusions: boundaryExclusions.length,
-          inclusion_radii_used: [...new Set(inclusions.map(i => i.radius))].sort((a, b) => a - b),
-          exclusion_radii_used: [...new Set(allExclusions.map(e => e.radius))].sort((a, b) => a - b),
+          inclusion_radii_used: Array.from(new Set(inclusions.map(i => i.radius))).sort((a, b) => a - b),
+          exclusion_radii_used: Array.from(new Set(allExclusions.map(e => e.radius))).sort((a, b) => a - b),
           coverage_strategy: territorySize < 20 ? 'Dense (small territory)' :
                             territorySize < 40 ? 'Medium coverage' :
                             territorySize < 60 ? 'Wide coverage' : 'Very wide coverage'
