@@ -7,7 +7,8 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 
 import { generateColor, calculateDistance, isPointInPolygon, estimateDriveTime, selectRadii, parseJSON } from '@/lib/geo-utils';
-import type { Clinic, OverlapAnalysis, GeoJSONFeature, GeoJSONFeatureCollection, GeoJSONGeometry } from '@/lib/types';
+import type { Clinic, OverlapAnalysis, GeoJSONFeature, GeoJSONFeatureCollection, GeoJSONGeometry, AgeTargetingData } from '@/lib/types';
+import ageTargetingData from '@/data/age-targeting.json';
 
 // Icons
 const SearchIcon = () => (
@@ -73,6 +74,7 @@ export default function ClinicTerritoryManager() {
   const [overlapAnalysis, setOverlapAnalysis] = useState<OverlapAnalysis | null>(null);
   const [selectedState, setSelectedState] = useState('');
   const [states, setStates] = useState<string[]>([]);
+  const [loadingStatus, setLoadingStatus] = useState('');
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -100,37 +102,23 @@ export default function ClinicTerritoryManager() {
     return null;
   }, []);
 
-  const displayAllClinics = useCallback((clinicsData: Clinic[]) => {
+  // Display clinic points on the map (fast, no boundaries)
+  const displayClinicPoints = useCallback((clinicsData: Clinic[]) => {
     if (!map.current) return;
 
     if (!map.current.isStyleLoaded()) {
-      setTimeout(() => displayAllClinics(clinicsData), 100);
+      setTimeout(() => displayClinicPoints(clinicsData), 100);
       return;
     }
 
     try {
-      ['clinic-boundaries-fill', 'clinic-boundaries-line', 'clinic-points', 'clinic-labels'].forEach(id => {
+      // Remove existing layers
+      ['clinic-points', 'clinic-labels'].forEach(id => {
         if (map.current!.getLayer(id)) map.current!.removeLayer(id);
       });
-      ['clinic-boundaries', 'clinic-points'].forEach(id => {
-        if (map.current!.getSource(id)) map.current!.removeSource(id);
-      });
-
-      const boundaryFeatures = clinicsData
-        .map(clinic => {
-          const geom = getGeometry(clinic);
-          if (!geom) return null;
-          return {
-            type: 'Feature' as const,
-            properties: {
-              clinic_id: clinic.clinic_id,
-              clinic_name: clinic.clinic_name,
-              color: generateColor(clinic.clinic_id)
-            },
-            geometry: geom
-          };
-        })
-        .filter(Boolean);
+      if (map.current.getSource('clinic-points')) {
+        map.current.removeSource('clinic-points');
+      }
 
       const pointFeatures = clinicsData
         .map(clinic => {
@@ -151,48 +139,6 @@ export default function ClinicTerritoryManager() {
           };
         })
         .filter(Boolean);
-
-      if (boundaryFeatures.length) {
-        map.current.addSource('clinic-boundaries', {
-          type: 'geojson',
-          data: { type: 'FeatureCollection', features: boundaryFeatures as GeoJSON.Feature[] }
-        });
-
-        map.current.addLayer({
-          id: 'clinic-boundaries-fill',
-          type: 'fill',
-          source: 'clinic-boundaries',
-          paint: {
-            'fill-color': ['get', 'color'],
-            'fill-opacity': 0.4
-          }
-        });
-
-        map.current.addLayer({
-          id: 'clinic-boundaries-line',
-          type: 'line',
-          source: 'clinic-boundaries',
-          paint: {
-            'line-color': ['get', 'color'],
-            'line-width': 2,
-            'line-opacity': 0.8
-          }
-        });
-
-        map.current.on('mouseenter', 'clinic-boundaries-fill', () => {
-          map.current!.getCanvas().style.cursor = 'pointer';
-        });
-        map.current.on('mouseleave', 'clinic-boundaries-fill', () => {
-          map.current!.getCanvas().style.cursor = '';
-        });
-
-        map.current.on('click', 'clinic-boundaries-fill', (e) => {
-          const feature = e.features?.[0];
-          if (!feature) return;
-          const clinic = clinicsData.find(c => c.clinic_id === feature.properties?.clinic_id);
-          if (clinic) setSelectedClinic(clinic);
-        });
-      }
 
       if (pointFeatures.length) {
         map.current.addSource('clinic-points', {
@@ -255,70 +201,160 @@ export default function ClinicTerritoryManager() {
         }
       }
     } catch (error) {
-      console.error('Display error:', error);
+      console.error('Display points error:', error);
     }
-  }, [getGeometry]);
+  }, []);
+
+  // Load and display boundaries in batches
+  const loadBoundaries = useCallback(async (clinicsData: Clinic[]) => {
+    if (!map.current) return;
+
+    const batchSize = 25;
+    let offset = 0;
+    let allBoundaryFeatures: GeoJSON.Feature[] = [];
+
+    // Initialize boundary source and layers
+    if (!map.current.getSource('clinic-boundaries')) {
+      map.current.addSource('clinic-boundaries', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] }
+      });
+
+      map.current.addLayer({
+        id: 'clinic-boundaries-fill',
+        type: 'fill',
+        source: 'clinic-boundaries',
+        paint: {
+          'fill-color': ['get', 'color'],
+          'fill-opacity': 0.4
+        }
+      }, 'clinic-points'); // Insert below points
+
+      map.current.addLayer({
+        id: 'clinic-boundaries-line',
+        type: 'line',
+        source: 'clinic-boundaries',
+        paint: {
+          'line-color': ['get', 'color'],
+          'line-width': 2,
+          'line-opacity': 0.8
+        }
+      }, 'clinic-points');
+
+      map.current.on('mouseenter', 'clinic-boundaries-fill', () => {
+        map.current!.getCanvas().style.cursor = 'pointer';
+      });
+      map.current.on('mouseleave', 'clinic-boundaries-fill', () => {
+        map.current!.getCanvas().style.cursor = '';
+      });
+      map.current.on('click', 'clinic-boundaries-fill', (e) => {
+        const feature = e.features?.[0];
+        if (!feature) return;
+        const clinic = clinicsData.find(c => c.clinic_id === feature.properties?.clinic_id);
+        if (clinic) setSelectedClinic(clinic);
+      });
+    }
+
+    try {
+      let hasMore = true;
+      let totalLoaded = 0;
+
+      while (hasMore) {
+        setLoadingStatus(`Loading boundaries... ${totalLoaded} loaded`);
+
+        const response = await fetch(`/api/boundaries?offset=${offset}&limit=${batchSize}`);
+        if (!response.ok) {
+          console.error('Error loading boundaries batch');
+          break;
+        }
+
+        const data = await response.json();
+
+        // Process boundaries
+        for (const boundary of data.boundaries) {
+          const raw = parseJSON<GeoJSONFeature | GeoJSONFeatureCollection | GeoJSONGeometry>(boundary.raw_geojson);
+          if (!raw) continue;
+
+          let geom: GeoJSONGeometry | null = null;
+          if ('type' in raw) {
+            if (raw.type === 'FeatureCollection' && 'features' in raw && raw.features?.length) {
+              geom = raw.features[raw.features.length - 1]?.geometry || null;
+            } else if (raw.type === 'Feature' && 'geometry' in raw) {
+              geom = raw.geometry;
+            } else if ('coordinates' in raw) {
+              geom = raw as GeoJSONGeometry;
+            }
+          }
+
+          if (geom) {
+            allBoundaryFeatures.push({
+              type: 'Feature',
+              properties: {
+                clinic_id: boundary.clinic_id,
+                clinic_name: boundary.clinic_name,
+                color: generateColor(boundary.clinic_id)
+              },
+              geometry: geom as GeoJSON.Geometry
+            });
+          }
+        }
+
+        // Update the map source with all boundaries so far
+        const source = map.current.getSource('clinic-boundaries') as mapboxgl.GeoJSONSource;
+        if (source) {
+          source.setData({
+            type: 'FeatureCollection',
+            features: allBoundaryFeatures
+          });
+        }
+
+        totalLoaded += data.boundaries.length;
+        hasMore = data.hasMore;
+        offset += batchSize;
+
+        // Small delay to not overwhelm the server
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      setLoadingStatus('');
+    } catch (error) {
+      console.error('Error loading boundaries:', error);
+      setLoadingStatus('Error loading boundaries');
+    }
+  }, []);
 
   const loadClinics = useCallback(async () => {
     try {
-      const [terrRes, locRes] = await Promise.all([
-        fetch(`${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,state,city,metro_type,raw_geojson&limit=1000`, {
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-            'Prefer': 'count=exact'
-          }
-        }),
-        fetch(`${SUPABASE_URL}/rest/v1/${encodeURIComponent('TJC Locations GeoCoded')}?select=*`, {
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`
-          }
-        })
-      ]);
+      setLoadingStatus('Loading clinics...');
+      const response = await fetch('/api/clinics');
 
-      if (!terrRes.ok || !locRes.ok) {
-        console.error('API Error');
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('API Error:', errorData);
         alert('Error loading clinics. Check console for details.');
+        setLoadingStatus('');
         return;
       }
 
-      const territories = await terrRes.json();
-      const locations = await locRes.json();
-
-      const locById: Record<string, Record<string, unknown>> = {};
-      locations.forEach((loc: Record<string, unknown>) => {
-        const id = (loc.ClinicID || loc.clinic_id) as string;
-        if (id) locById[id] = loc;
-      });
-
-      const merged: Clinic[] = territories.map((t: Record<string, unknown>) => {
-        const id = (t.clinic_id || t.ClinicID) as string;
-        const loc = id ? locById[id] : null;
-        return {
-          clinic_id: id,
-          clinic_name: (t.clinic_name || loc?.Name || `Clinic ${id}`) as string,
-          state: (t.state || loc?.State) as string,
-          city: (t.city || loc?.City || loc?.city) as string,
-          address: (loc?.Address || loc?.address || t.address) as string,
-          latitude: parseFloat(String(t.latitude ?? loc?.Latitude ?? loc?.latitude)),
-          longitude: parseFloat(String(t.longitude ?? loc?.Longitude ?? loc?.longitude)),
-          raw_geojson: t.raw_geojson as string,
-          metro_type: (t.metro_type || 'unknown') as string
-        };
-      });
+      const data = await response.json();
+      const merged: Clinic[] = data.clinics;
 
       setClinics(merged);
 
       const uniqueStates = Array.from(new Set(merged.map(c => c.state).filter((s): s is string => Boolean(s))));
       setStates(uniqueStates.sort());
 
-      displayAllClinics(merged);
+      // First display points (fast)
+      displayClinicPoints(merged);
+
+      // Then load boundaries in batches (slower, but progressive)
+      loadBoundaries(merged);
     } catch (error) {
       console.error('Error loading clinics:', error);
       alert('Error loading clinics: ' + (error as Error).message);
+      setLoadingStatus('');
     }
-  }, [SUPABASE_URL, SUPABASE_KEY, displayAllClinics]);
+  }, [displayClinicPoints, loadBoundaries]);
 
   // Initialize map
   useEffect(() => {
@@ -481,7 +517,35 @@ export default function ClinicTerritoryManager() {
       const lat = Number(selectedClinic.latitude);
       const lng = Number(selectedClinic.longitude);
 
-      const geometry = getGeometry(selectedClinic);
+      // Try to get geometry from clinic object first
+      let geometry = getGeometry(selectedClinic);
+
+      // If not available, fetch boundary on-demand
+      if (!geometry) {
+        setSaveStatus('loading boundary...');
+        try {
+          const boundaryResponse = await fetch(`/api/boundaries?clinic_id=${selectedClinic.clinic_id}`);
+          if (boundaryResponse.ok) {
+            const boundaryData = await boundaryResponse.json();
+            if (boundaryData.boundaries && boundaryData.boundaries.length > 0) {
+              const raw = parseJSON<GeoJSONFeature | GeoJSONFeatureCollection | GeoJSONGeometry>(
+                boundaryData.boundaries[0].raw_geojson
+              );
+              if (raw) {
+                if (raw.type === 'FeatureCollection' && 'features' in raw && raw.features?.length) {
+                  geometry = raw.features[raw.features.length - 1]?.geometry || null;
+                } else if (raw.type === 'Feature' && 'geometry' in raw) {
+                  geometry = raw.geometry;
+                } else if ('coordinates' in raw) {
+                  geometry = raw as GeoJSONGeometry;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Error fetching boundary:', e);
+        }
+      }
 
       if (!geometry) {
         alert('No boundary geometry found for this clinic');
@@ -504,210 +568,326 @@ export default function ClinicTerritoryManager() {
       const territoryHeight = calculateDistance(minLat, lng, maxLat, lng);
       const territorySize = Math.max(territoryWidth, territoryHeight);
 
-      setSaveStatus('finding nearby clinics...');
-
-      const nearbyClinicExclusions: Array<{
-        name: string;
-        address: string;
-        latitude: number;
-        longitude: number;
-        radius: number;
-        distance_unit: string;
-        distance_miles: number;
-        estimated_drive_time_min: number;
-      }> = [];
-
-      for (const clinic of clinics) {
-        if (clinic.clinic_id === selectedClinic.clinic_id) continue;
-
-        const clinicLat = Number(clinic.latitude);
-        const clinicLng = Number(clinic.longitude);
-
-        if (!Number.isFinite(clinicLat) || !Number.isFinite(clinicLng)) continue;
-
-        const distanceMiles = calculateDistance(lat, lng, clinicLat, clinicLng);
-        const driveTimeMinutes = estimateDriveTime(distanceMiles, selectedClinic.metro_type);
-
-        if (driveTimeMinutes <= 40) {
-          const address = await getAddress(clinicLat, clinicLng);
-
-          let exclusionRadius: number;
-          if (distanceMiles < 10) exclusionRadius = 5;
-          else if (distanceMiles < 20) exclusionRadius = 10;
-          else if (distanceMiles < 30) exclusionRadius = 15;
-          else exclusionRadius = 25;
-
-          nearbyClinicExclusions.push({
-            name: `Competing Clinic: ${clinic.clinic_name}`,
-            address: address || `${clinic.clinic_name}, ${clinic.state}`,
-            latitude: clinicLat,
-            longitude: clinicLng,
-            radius: exclusionRadius,
-            distance_unit: 'mile',
-            distance_miles: Math.round(distanceMiles * 10) / 10,
-            estimated_drive_time_min: Math.round(driveTimeMinutes)
-          });
-
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
+      // Determine neutral zone buffer based on metro type
+      const metroType = (selectedClinic.metro_type || 'suburban').toLowerCase();
+      let neutralBuffer: number;
+      if (metroType === 'urban') {
+        neutralBuffer = 3;
+      } else if (metroType === 'rural') {
+        neutralBuffer = 10;
+      } else {
+        neutralBuffer = 5; // suburban or unknown
       }
 
       setSaveStatus('generating inclusion points...');
 
-      const inclusionPoints: Array<{ lat: number; lng: number; distFromCenter: number }> = [];
+      // INNER LAYER: Find points INSIDE the territory for inclusions
+      // Always start with the clinic's own location as the first inclusion
+      const inclusionPoints: Array<{ lat: number; lng: number; distFromCenter: number; distFromBoundary: number }> = [];
 
-      for (let i = 0; i < 1000 && inclusionPoints.length < 10; i++) {
+      // Calculate clinic's distance to boundary
+      const clinicDistFromBoundary = Math.min(
+        ...coords.map(c => calculateDistance(lat, lng, c[1], c[0]))
+      );
+
+      // Always add the clinic location as the first inclusion point
+      inclusionPoints.push({
+        lat: lat,
+        lng: lng,
+        distFromCenter: 0,
+        distFromBoundary: clinicDistFromBoundary
+      });
+
+      // Find additional points inside the territory
+      for (let i = 0; i < 2000 && inclusionPoints.length < 50; i++) {
         const testLat = minLat + (maxLat - minLat) * Math.random();
         const testLng = minLng + (maxLng - minLng) * Math.random();
 
         if (isPointInPolygon([testLng, testLat], coords as [number, number][])) {
           const distFromCenter = calculateDistance(lat, lng, testLat, testLng);
-          inclusionPoints.push({ lat: testLat, lng: testLng, distFromCenter });
+          // Calculate distance to nearest boundary point
+          const distFromBoundary = Math.min(
+            ...coords.map(c => calculateDistance(testLat, testLng, c[1], c[0]))
+          );
+          inclusionPoints.push({ lat: testLat, lng: testLng, distFromCenter, distFromBoundary });
         }
       }
 
-      inclusionPoints.sort((a, b) => a.distFromCenter - b.distFromCenter);
+      // Sort additional points by distance from boundary (furthest first = most interior)
+      // But keep clinic location first
+      const clinicPoint = inclusionPoints[0];
+      const otherPoints = inclusionPoints.slice(1).sort((a, b) => b.distFromBoundary - a.distFromBoundary);
 
-      const distributedInclusions: typeof inclusionPoints = [];
-      for (const point of inclusionPoints) {
-        if (distributedInclusions.length === 0) {
+      // Start with clinic, then add distributed additional points
+      const distributedInclusions: typeof inclusionPoints = [clinicPoint];
+      for (const point of otherPoints) {
+        const tooClose = distributedInclusions.some(existing =>
+          calculateDistance(existing.lat, existing.lng, point.lat, point.lng) < territorySize * 0.15
+        );
+        if (!tooClose) {
           distributedInclusions.push(point);
-        } else {
-          const tooClose = distributedInclusions.some(existing =>
-            calculateDistance(existing.lat, existing.lng, point.lat, point.lng) < territorySize * 0.15
-          );
-          if (!tooClose) {
-            distributedInclusions.push(point);
-          }
         }
         if (distributedInclusions.length >= 10) break;
       }
 
-      setSaveStatus('generating boundary exclusions...');
-
-      const exclusionPoints: Array<{ lat: number; lng: number; distFromBoundary: number }> = [];
-
-      for (let i = 0; i < 1000 && exclusionPoints.length < 10; i++) {
-        let testLat: number, testLng: number;
-        const side = Math.random();
-
-        if (side < 0.25) {
-          testLat = maxLat + (maxLat - minLat) * Math.random() * 0.3;
-          testLng = minLng + (maxLng - minLng) * Math.random();
-        } else if (side < 0.5) {
-          testLat = minLat - (maxLat - minLat) * Math.random() * 0.3;
-          testLng = minLng + (maxLng - minLng) * Math.random();
-        } else if (side < 0.75) {
-          testLat = minLat + (maxLat - minLat) * Math.random();
-          testLng = maxLng + (maxLng - minLng) * Math.random() * 0.3;
-        } else {
-          testLat = minLat + (maxLat - minLat) * Math.random();
-          testLng = minLng - (maxLng - minLng) * Math.random() * 0.3;
-        }
-
-        if (!isPointInPolygon([testLng, testLat], coords as [number, number][])) {
-          const distFromBoundary = Math.min(
-            ...coords.map(c => calculateDistance(testLat, testLng, c[1], c[0]))
-          );
-          exclusionPoints.push({ lat: testLat, lng: testLng, distFromBoundary });
-        }
-      }
-
-      exclusionPoints.sort((a, b) => a.distFromBoundary - b.distFromBoundary);
-      const topExclusions = exclusionPoints.slice(0, 10);
-
       const inclusionRadii = selectRadii(territorySize, distributedInclusions.length);
-      const exclusionRadii = selectRadii(territorySize, topExclusions.length);
+
+      // Calculate the actual maximum inclusion radius (considering hard boundary caps)
+      const actualMaxInclusionRadius = distributedInclusions.length > 0
+        ? Math.max(...distributedInclusions.map((p, i) => Math.min(inclusionRadii[i] || 5, p.distFromBoundary)))
+        : 5;
+
+      // Minimum distance from territory boundary for exclusion centers:
+      // neutral zone extends (actualMaxInclusionRadius + neutralBuffer) from inclusion centers
+      // Plus 10 miles gap required from neutral zone outer edge
+      const minExclusionDistance = actualMaxInclusionRadius + neutralBuffer + 10;
+
+      setSaveStatus('generating boundary exclusion points...');
+
+      // OUTER LAYER: Build exclusion zone with 8 points:
+      // - 4 corner points (SW, SE, NW, NE) at 45mi radius, ~60-70mi from clinic center
+      // - 4 intermediate points (S, W, N, E) at 30mi radius, ~50-60mi from clinic center
+
+      // 1 degree of latitude ≈ 69 miles
+      const milesToDegreesLat = (miles: number) => miles / 69;
+
+      // Longitude degrees per mile varies by latitude
+      const milesToDegreesLng = (miles: number, atLat: number) => miles / (69 * Math.cos(atLat * Math.PI / 180));
+
+      // Use clinic center as reference point
+      const clinicLat = lat;
+      const clinicLng = lng;
+
+      // Distance from clinic to corner exclusions (diagonal) - accounts for neutral zone + gap
+      const cornerDistance = neutralBuffer + 50 + (territorySize / 2);
+      // Distance from clinic to intermediate exclusions (cardinal directions)
+      const cardinalDistance = neutralBuffer + 40 + (territorySize / 2);
+
+      // Build 8 exclusion points
+      const exclusionPoints: Array<{ lat: number; lng: number; radius: number; name: string }> = [];
+
+      // 4 CORNER points with 45mi radius (SW, SE, NW, NE)
+      // Southwest
+      exclusionPoints.push({
+        lat: clinicLat - milesToDegreesLat(cornerDistance * 0.7),
+        lng: clinicLng - milesToDegreesLng(cornerDistance * 0.7, clinicLat),
+        radius: 45,
+        name: 'Southwest'
+      });
+      // Southeast
+      exclusionPoints.push({
+        lat: clinicLat - milesToDegreesLat(cornerDistance * 0.7),
+        lng: clinicLng + milesToDegreesLng(cornerDistance * 0.7, clinicLat),
+        radius: 45,
+        name: 'Southeast'
+      });
+      // Northwest
+      exclusionPoints.push({
+        lat: clinicLat + milesToDegreesLat(cornerDistance * 0.7),
+        lng: clinicLng - milesToDegreesLng(cornerDistance * 0.7, clinicLat),
+        radius: 45,
+        name: 'Northwest'
+      });
+      // Northeast
+      exclusionPoints.push({
+        lat: clinicLat + milesToDegreesLat(cornerDistance * 0.7),
+        lng: clinicLng + milesToDegreesLng(cornerDistance * 0.7, clinicLat),
+        radius: 45,
+        name: 'Northeast'
+      });
+
+      // 4 INTERMEDIATE points with 30mi radius (S, W, N, E)
+      // South
+      exclusionPoints.push({
+        lat: clinicLat - milesToDegreesLat(cardinalDistance),
+        lng: clinicLng,
+        radius: 30,
+        name: 'South'
+      });
+      // West
+      exclusionPoints.push({
+        lat: clinicLat,
+        lng: clinicLng - milesToDegreesLng(cardinalDistance, clinicLat),
+        radius: 30,
+        name: 'West'
+      });
+      // North
+      exclusionPoints.push({
+        lat: clinicLat + milesToDegreesLat(cardinalDistance),
+        lng: clinicLng,
+        radius: 30,
+        name: 'North'
+      });
+      // East
+      exclusionPoints.push({
+        lat: clinicLat,
+        lng: clinicLng + milesToDegreesLng(cardinalDistance, clinicLat),
+        radius: 30,
+        name: 'East'
+      });
+
+      const distributedExclusions = exclusionPoints;
 
       setSaveStatus('geocoding addresses...');
 
-      const inclusions: Array<{
+      // Layer type definitions
+      interface LayerCircle {
         name: string;
         address: string;
         latitude: number;
         longitude: number;
         radius: number;
         distance_unit: string;
-      }> = [];
+        layer_type: 'include' | 'neutral' | 'exclude';
+      }
 
+      const innerLayer: LayerCircle[] = [];      // Include zone - INSIDE territory
+      const middleLayer: LayerCircle[] = [];     // Neutral zone - documentation only
+      const outerLayer: LayerCircle[] = [];      // Exclusion donut - OUTSIDE territory
+
+      // Process inclusion points (inner layer)
       for (let i = 0; i < distributedInclusions.length; i++) {
         const point = distributedInclusions[i];
-        const address = await getAddress(point.lat, point.lng);
 
-        inclusions.push({
-          name: `Inclusion ${i + 1}`,
-          address: address || 'Address not found',
-          latitude: point.lat,
-          longitude: point.lng,
-          radius: inclusionRadii[i] || 5,
-          distance_unit: 'mile'
-        });
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      const boundaryExclusions: Array<{
-        name: string;
-        address: string;
-        latitude: number;
-        longitude: number;
-        radius: number;
-        distance_unit: string;
-      }> = [];
-
-      for (let i = 0; i < topExclusions.length; i++) {
-        const point = topExclusions[i];
-        const address = await getAddress(point.lat, point.lng);
-
-        boundaryExclusions.push({
-          name: `Boundary Exclusion ${i + 1}`,
-          address: address || 'Address not found',
-          latitude: point.lat,
-          longitude: point.lng,
-          radius: exclusionRadii[i] || 10,
-          distance_unit: 'mile'
-        });
-
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      const allExclusions = [...nearbyClinicExclusions, ...boundaryExclusions];
-
-      const targeting = {
-        clinic_id: selectedClinic.clinic_id,
-        clinic_name: selectedClinic.clinic_name,
-        generated_at: new Date().toISOString(),
-        geo_locations: {
-          custom_locations: inclusions
-        },
-        excluded_geo_locations: {
-          custom_locations: allExclusions
-        },
-        territory_info: {
-          center_latitude: lat,
-          center_longitude: lng,
-          territory_width_miles: Math.round(territoryWidth * 10) / 10,
-          territory_height_miles: Math.round(territoryHeight * 10) / 10,
-          territory_size_miles: Math.round(territorySize * 10) / 10
-        },
-        summary: {
-          total_inclusions: inclusions.length,
-          total_exclusions: allExclusions.length,
-          competing_clinics_excluded: nearbyClinicExclusions.length,
-          boundary_exclusions: boundaryExclusions.length,
-          inclusion_radii_used: Array.from(new Set(inclusions.map(i => i.radius))).sort((a, b) => a - b),
-          exclusion_radii_used: Array.from(new Set(allExclusions.map(e => e.radius))).sort((a, b) => a - b),
-          coverage_strategy: territorySize < 20 ? 'Dense (small territory)' :
-                            territorySize < 40 ? 'Medium coverage' :
-                            territorySize < 60 ? 'Wide coverage' : 'Very wide coverage'
+        // For the clinic location (first point), use the clinic's actual address
+        // For other points, geocode the address
+        let address: string;
+        let pointName: string;
+        if (i === 0) {
+          // This is the clinic location
+          address = selectedClinic.address
+            ? `${selectedClinic.address}, ${selectedClinic.city || ''}, ${selectedClinic.state || ''}`.trim()
+            : await getAddress(point.lat, point.lng) || 'Clinic Address';
+          pointName = `Clinic: ${selectedClinic.clinic_name}`;
+        } else {
+          address = await getAddress(point.lat, point.lng) || 'Address not found';
+          pointName = `Include Zone ${i}`;
         }
-      };
 
-      const blob = new Blob([JSON.stringify(targeting, null, 2)], { type: 'application/json' });
+        // Use the pre-calculated distance to boundary (hard boundary cap)
+        const distToBoundary = point.distFromBoundary;
+
+        // Round to nearest allowed radius: 1, 3, 5, 10, 15, 25, 30, 40, 50
+        const allowedRadii = [1, 3, 5, 10, 15, 25, 30, 40, 50];
+        const roundToAllowed = (value: number): number => {
+          // Find the closest allowed value
+          return allowedRadii.reduce((prev, curr) =>
+            Math.abs(curr - value) < Math.abs(prev - value) ? curr : prev
+          );
+        };
+
+        // Cap the inclusion radius to not exceed the distance to boundary (hard boundary)
+        const proposedRadius = inclusionRadii[i] || 5;
+        const cappedRadius = Math.min(proposedRadius, distToBoundary);
+        const innerRadius = roundToAllowed(cappedRadius);
+        const neutralRadius = innerRadius + neutralBuffer;
+
+        // Inner layer - Include zone (sent to Facebook)
+        innerLayer.push({
+          name: pointName,
+          address: address,
+          latitude: point.lat,
+          longitude: point.lng,
+          radius: innerRadius,
+          distance_unit: 'mile',
+          layer_type: 'include'
+        });
+
+        // Middle layer - Neutral zone (documentation only, NOT sent to Facebook)
+        // This represents the gap between inclusion edge and exclusion edge
+        middleLayer.push({
+          name: `Neutral Zone ${i + 1}`,
+          address: address,
+          latitude: point.lat,
+          longitude: point.lng,
+          radius: roundToAllowed(neutralRadius),
+          distance_unit: 'mile',
+          layer_type: 'neutral'
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Process exclusion points (outer layer)
+      for (let i = 0; i < distributedExclusions.length; i++) {
+        const point = distributedExclusions[i];
+        if (!point) continue;
+
+        const address = await getAddress(point.lat, point.lng);
+
+        // Outer layer - Exclusion with variable radius (45mi for corners, 30mi for cardinals)
+        outerLayer.push({
+          name: `${point.name} Exclusion`,
+          address: address || 'Address not found',
+          latitude: point.lat,
+          longitude: point.lng,
+          radius: point.radius,
+          distance_unit: 'mile',
+          layer_type: 'exclude'
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Sort inclusions and exclusions by radius
+      const sortedInclusions = [...innerLayer].sort((a, b) => a.radius - b.radius);
+      const sortedExclusions = [...outerLayer].sort((a, b) => a.radius - b.radius);
+
+      // Build simple text file
+      const lines: string[] = [];
+
+      lines.push(`Facebook Audience Targeting`);
+      lines.push(`Clinic: ${selectedClinic.clinic_name} (${selectedClinic.clinic_id})`);
+      lines.push(`Metro Type: ${selectedClinic.metro_type}`);
+      lines.push(`Generated: ${new Date().toLocaleString()}`);
+      lines.push(`Neutral Buffer: ${neutralBuffer} miles (${metroType})`);
+      lines.push('');
+
+      // Age targeting section
+      const clinicName = selectedClinic.clinic_name.replace(/^The Joint Chiropractic\s+/i, '');
+      const ageData = (ageTargetingData as AgeTargetingData)[clinicName];
+      if (ageData) {
+        lines.push('='.repeat(60));
+        lines.push(`AGE TARGETING (Based on ${ageData.sample_size} first-party conversions)`);
+        lines.push('='.repeat(60));
+        lines.push('');
+        lines.push(`Tier 1 (Core):    ${ageData.t1_min}-${ageData.t1_max} years`);
+        lines.push(`Tier 2 (Broad):   ${ageData.t2_min}-${ageData.t2_max} years`);
+        lines.push(`Tier 3 (Maximum): ${ageData.t3_min}-${ageData.t3_max} years`);
+        lines.push(`Blended Range:    ${ageData.blend_min}-${ageData.blend_max} years (75% T1 / 25% T2)`);
+        lines.push('');
+        lines.push('Budget Allocation: 60-70% T1 | 25-30% T2 | 0-10% T3');
+        lines.push('');
+      }
+
+      lines.push('='.repeat(60));
+      lines.push('INCLUDE LOCATIONS');
+      lines.push('='.repeat(60));
+      lines.push('');
+
+      for (const loc of sortedInclusions) {
+        lines.push(`${loc.address}`);
+        lines.push(`  Radius: ${loc.radius} miles`);
+        lines.push('');
+      }
+
+      lines.push('='.repeat(60));
+      lines.push('EXCLUDE LOCATIONS');
+      lines.push('='.repeat(60));
+      lines.push('');
+
+      for (const loc of sortedExclusions) {
+        lines.push(`${loc.address}`);
+        lines.push(`  Radius: ${loc.radius} miles`);
+        lines.push('');
+      }
+
+      const textContent = lines.join('\n');
+      const blob = new Blob([textContent], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `facebook_targeting_${selectedClinic.clinic_id}_${selectedClinic.clinic_name.replace(/\s+/g, '_')}.json`;
+      a.download = `facebook_audience_${selectedClinic.clinic_id}_${selectedClinic.clinic_name.replace(/\s+/g, '_')}.txt`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -989,6 +1169,9 @@ export default function ClinicTerritoryManager() {
                 <p className="text-sm text-gray-600">
                   Each clinic has a unique color. Click any territory or marker to view details.
                 </p>
+                {loadingStatus && (
+                  <p className="text-sm text-blue-600 mt-2 font-medium">{loadingStatus}</p>
+                )}
               </div>
             </div>
           </div>

@@ -43,6 +43,20 @@ export interface ExclusionLocation {
   estimated_drive_time_min?: number;
 }
 
+export interface AgeTargeting {
+  sample_size: number;
+  t1_min: number;
+  t1_max: number;
+  t2_min: number;
+  t2_max: number;
+  t3_min: number;
+  t3_max: number;
+  blend_min: number;
+  blend_max: number;
+}
+
+export type AgeTargetingData = Record<string, AgeTargeting>;
+
 export interface FacebookTargeting {
   clinic_id: string;
   clinic_name: string;
