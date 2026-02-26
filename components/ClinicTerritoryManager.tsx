@@ -6,6 +6,7 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 
+import Link from 'next/link';
 import { generateColor, calculateDistance, isPointInPolygon, estimateDriveTime, selectRadii, parseJSON } from '@/lib/geo-utils';
 import type { Clinic, OverlapAnalysis, GeoJSONFeature, GeoJSONFeatureCollection, GeoJSONGeometry, AgeTargetingData } from '@/lib/types';
 import ageTargetingData from '@/data/age-targeting.json';
@@ -850,10 +851,21 @@ export default function ClinicTerritoryManager() {
       lines.push('='.repeat(60));
       lines.push('');
 
-      for (let i = 0; i < sortedInclusions.length; i++) {
-        const loc = sortedInclusions[i];
-        lines.push(`${i + 1}. ${loc.address}`);
-        lines.push(`   Radius: ${loc.radius} mi`);
+      // Group inclusions by radius
+      const inclusionsByRadius = sortedInclusions.reduce((acc, loc) => {
+        const key = loc.radius;
+        if (!acc[key]) acc[key] = [];
+        acc[key].push(loc);
+        return acc;
+      }, {} as Record<number, typeof sortedInclusions>);
+
+      // Sort radii and output each group
+      const inclusionRadii = Object.keys(inclusionsByRadius).map(Number).sort((a, b) => a - b);
+      for (const radius of inclusionRadii) {
+        lines.push(`${radius} mi radius:`);
+        for (const loc of inclusionsByRadius[radius]) {
+          lines.push(`${loc.address}`);
+        }
         lines.push('');
       }
 
@@ -862,10 +874,21 @@ export default function ClinicTerritoryManager() {
       lines.push('='.repeat(60));
       lines.push('');
 
-      for (let i = 0; i < sortedExclusions.length; i++) {
-        const loc = sortedExclusions[i];
-        lines.push(`${i + 1}. ${loc.address}`);
-        lines.push(`   Radius: ${loc.radius} mi`);
+      // Group exclusions by radius
+      const exclusionsByRadius = sortedExclusions.reduce((acc, loc) => {
+        const key = loc.radius;
+        if (!acc[key]) acc[key] = [];
+        acc[key].push(loc);
+        return acc;
+      }, {} as Record<number, typeof sortedExclusions>);
+
+      // Sort radii and output each group
+      const exclusionRadii = Object.keys(exclusionsByRadius).map(Number).sort((a, b) => a - b);
+      for (const radius of exclusionRadii) {
+        lines.push(`${radius} mi radius:`);
+        for (const loc of exclusionsByRadius[radius]) {
+          lines.push(`${loc.address}`);
+        }
         lines.push('');
       }
 
@@ -1022,6 +1045,13 @@ export default function ClinicTerritoryManager() {
           >
             Manage Overlaps
           </button>
+
+          <Link
+            href="/chat"
+            className="mt-2 w-full bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 block text-center"
+          >
+            Data Assistant
+          </Link>
         </div>
 
         <div className="p-4">
