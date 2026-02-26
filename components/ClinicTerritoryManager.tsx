@@ -501,9 +501,29 @@ export default function ClinicTerritoryManager() {
     }
   };
 
-  const getAddress = async (latitude: number, longitude: number): Promise<string | null> => {
+  const getAddress = async (latitude: number, longitude: number, requireStreetAddress: boolean = false): Promise<string | null> => {
     try {
-      // Include place, locality, neighborhood, and address types to handle remote areas
+      if (requireStreetAddress) {
+        // For exclusion points: search for nearest street address within 10 miles
+        // Use proximity bias and limit to addresses only
+        const response = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/address.json?access_token=${MAPBOX_TOKEN}&proximity=${longitude},${latitude}&types=address&limit=1`
+        );
+        const data = await response.json();
+        if (data.features && data.features.length > 0) {
+          return data.features[0].place_name;
+        }
+        // If no address found, try reverse geocoding for any POI or address
+        const reverseResponse = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=poi,address&limit=1`
+        );
+        const reverseData = await reverseResponse.json();
+        if (reverseData.features && reverseData.features.length > 0) {
+          return reverseData.features[0].place_name;
+        }
+      }
+
+      // Standard reverse geocoding for inclusion points
       const response = await fetch(
         `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address,neighborhood,locality,place`
       );
@@ -763,9 +783,12 @@ export default function ClinicTerritoryManager() {
         const point = distributedExclusions[i];
         if (!point) continue;
 
-        const address = await getAddress(point.lat, point.lng);
+        setSaveStatus(`geocoding exclusions... ${i + 1}/${distributedExclusions.length}`);
 
-        // Outer layer - Exclusion with variable radius (45mi for corners, 30mi for cardinals)
+        // Use requireStreetAddress=true to find nearest actual street address
+        const address = await getAddress(point.lat, point.lng, true);
+
+        // Outer layer - Exclusion
         outerLayer.push({
           name: `${point.name} Exclusion`,
           address: address || 'Address not found',
