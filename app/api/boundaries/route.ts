@@ -12,11 +12,11 @@ export async function GET(request: NextRequest) {
 
     let url: string;
     if (clinicId) {
-      // Load single clinic boundary
-      url = `${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,raw_geojson&clinic_id=eq.${clinicId}`;
+      // Load single clinic boundary - use geojson (corrected boundaries from geom column)
+      url = `${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,metro_type,geojson&clinic_id=eq.${clinicId}`;
     } else {
-      // Load batch of boundaries
-      url = `${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,raw_geojson&offset=${offset}&limit=${limit}`;
+      // Load batch of boundaries - use geojson (corrected boundaries from geom column)
+      url = `${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,metro_type,geojson&offset=${offset}&limit=${limit}`;
     }
 
     const response = await fetch(url, {

@@ -7,6 +7,7 @@ export interface Clinic {
   latitude: number;
   longitude: number;
   raw_geojson?: string | GeoJSONFeature | GeoJSONFeatureCollection | GeoJSONGeometry;
+  geojson?: GeoJSONGeometry;  // Corrected boundary from geom column
   metro_type: string;
 }
 

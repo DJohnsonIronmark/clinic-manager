@@ -85,12 +85,32 @@ export default function ClinicTerritoryManager() {
   const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
   const getGeometry = useCallback((clinic: Clinic): GeoJSONGeometry | null => {
+    // Prefer corrected geojson (from geom column) over raw_geojson
+    if (clinic.geojson && 'type' in clinic.geojson && 'coordinates' in clinic.geojson) {
+      return clinic.geojson;
+    }
+
+    // Fallback to raw_geojson for backwards compatibility
     const raw = parseJSON<GeoJSONFeature | GeoJSONFeatureCollection | GeoJSONGeometry>(clinic.raw_geojson as string);
     if (!raw) return null;
 
     if ('type' in raw) {
       if (raw.type === 'FeatureCollection' && 'features' in raw && raw.features?.length) {
-        return raw.features[raw.features.length - 1]?.geometry || null;
+        // Select isochrone index based on metro type
+        // Features are ordered: [30min, 20min, 15min, 10min]
+        const metroType = (clinic.metro_type || 'suburban').toLowerCase();
+        let featureIndex: number;
+
+        if (metroType === 'urban') {
+          featureIndex = 2;  // 15-min isochrone
+        } else if (metroType === 'rural') {
+          featureIndex = 0;  // 30-min isochrone
+        } else {
+          featureIndex = 1;  // 20-min isochrone (suburban/default)
+        }
+
+        // Fallback to first feature if index doesn't exist
+        return raw.features[featureIndex]?.geometry || raw.features[0]?.geometry || null;
       }
       if (raw.type === 'Feature' && 'geometry' in raw) {
         return raw.geometry;
@@ -270,23 +290,12 @@ export default function ClinicTerritoryManager() {
 
         const data = await response.json();
 
-        // Process boundaries
+        // Process boundaries - use corrected geojson from geom column
         for (const boundary of data.boundaries) {
-          const raw = parseJSON<GeoJSONFeature | GeoJSONFeatureCollection | GeoJSONGeometry>(boundary.raw_geojson);
-          if (!raw) continue;
+          // geojson contains the corrected boundary geometry directly
+          const geom = boundary.geojson as GeoJSONGeometry | null;
 
-          let geom: GeoJSONGeometry | null = null;
-          if ('type' in raw) {
-            if (raw.type === 'FeatureCollection' && 'features' in raw && raw.features?.length) {
-              geom = raw.features[raw.features.length - 1]?.geometry || null;
-            } else if (raw.type === 'Feature' && 'geometry' in raw) {
-              geom = raw.geometry;
-            } else if ('coordinates' in raw) {
-              geom = raw as GeoJSONGeometry;
-            }
-          }
-
-          if (geom) {
+          if (geom && 'type' in geom && 'coordinates' in geom) {
             allBoundaryFeatures.push({
               type: 'Feature',
               properties: {
@@ -528,17 +537,10 @@ export default function ClinicTerritoryManager() {
           if (boundaryResponse.ok) {
             const boundaryData = await boundaryResponse.json();
             if (boundaryData.boundaries && boundaryData.boundaries.length > 0) {
-              const raw = parseJSON<GeoJSONFeature | GeoJSONFeatureCollection | GeoJSONGeometry>(
-                boundaryData.boundaries[0].raw_geojson
-              );
-              if (raw) {
-                if (raw.type === 'FeatureCollection' && 'features' in raw && raw.features?.length) {
-                  geometry = raw.features[raw.features.length - 1]?.geometry || null;
-                } else if (raw.type === 'Feature' && 'geometry' in raw) {
-                  geometry = raw.geometry;
-                } else if ('coordinates' in raw) {
-                  geometry = raw as GeoJSONGeometry;
-                }
+              // Use corrected geojson (from geom column) directly
+              const geojson = boundaryData.boundaries[0].geojson as GeoJSONGeometry;
+              if (geojson && 'type' in geojson && 'coordinates' in geojson) {
+                geometry = geojson;
               }
             }
           }
@@ -581,16 +583,33 @@ export default function ClinicTerritoryManager() {
 
       setSaveStatus('generating inclusion points...');
 
-      // INNER LAYER: Find points INSIDE the territory for inclusions
-      // Always start with the clinic's own location as the first inclusion
+      // CONSTRAINT: Facebook visual preview requires 25 points max (inclusions + exclusions)
+      // Using 4 exclusion points (corners), leaving 21 for inclusions
+      const MAX_TOTAL_POINTS = 25;
+      const NUM_EXCLUSIONS = 4;
+      const MAX_INCLUSIONS = MAX_TOTAL_POINTS - NUM_EXCLUSIONS;
+
+      // Use 5-mile radius for better coverage with fewer points
+      // Grid spacing ~8 miles for slight overlap with 5-mile circles
+      const CIRCLE_RADIUS = 5;
+      const GRID_SPACING = 8;
+
+      // Convert miles to degrees
+      const milesToDegreesLat = (miles: number) => miles / 69;
+      const milesToDegreesLng = (miles: number, atLat: number) => miles / (69 * Math.cos(atLat * Math.PI / 180));
+
+      const latStep = milesToDegreesLat(GRID_SPACING);
+      const lngStep = milesToDegreesLng(GRID_SPACING, lat);
+
+      // Hexagonal offset for alternating rows
+      const hexOffset = lngStep / 2;
+
       const inclusionPoints: Array<{ lat: number; lng: number; distFromCenter: number; distFromBoundary: number }> = [];
 
-      // Calculate clinic's distance to boundary
+      // Always add clinic location first
       const clinicDistFromBoundary = Math.min(
         ...coords.map(c => calculateDistance(lat, lng, c[1], c[0]))
       );
-
-      // Always add the clinic location as the first inclusion point
       inclusionPoints.push({
         lat: lat,
         lng: lng,
@@ -598,132 +617,82 @@ export default function ClinicTerritoryManager() {
         distFromBoundary: clinicDistFromBoundary
       });
 
-      // Find additional points inside the territory
-      for (let i = 0; i < 2000 && inclusionPoints.length < 50; i++) {
-        const testLat = minLat + (maxLat - minLat) * Math.random();
-        const testLng = minLng + (maxLng - minLng) * Math.random();
+      // Generate hexagonal grid covering the bounding box
+      let rowIndex = 0;
+      for (let testLat = minLat; testLat <= maxLat; testLat += latStep) {
+        const rowOffset = (rowIndex % 2 === 1) ? hexOffset : 0;
 
-        if (isPointInPolygon([testLng, testLat], coords as [number, number][])) {
-          const distFromCenter = calculateDistance(lat, lng, testLat, testLng);
-          // Calculate distance to nearest boundary point
-          const distFromBoundary = Math.min(
-            ...coords.map(c => calculateDistance(testLat, testLng, c[1], c[0]))
-          );
-          inclusionPoints.push({ lat: testLat, lng: testLng, distFromCenter, distFromBoundary });
+        for (let testLng = minLng + rowOffset; testLng <= maxLng; testLng += lngStep) {
+          // Skip if too close to clinic location (already added)
+          const distFromClinic = calculateDistance(lat, lng, testLat, testLng);
+          if (distFromClinic < GRID_SPACING * 0.5) continue;
+
+          // Check if point is inside the polygon
+          if (isPointInPolygon([testLng, testLat], coords as [number, number][])) {
+            const distFromBoundary = Math.min(
+              ...coords.map(c => calculateDistance(testLat, testLng, c[1], c[0]))
+            );
+            inclusionPoints.push({
+              lat: testLat,
+              lng: testLng,
+              distFromCenter: distFromClinic,
+              distFromBoundary
+            });
+          }
         }
+        rowIndex++;
       }
 
-      // Sort additional points by distance from boundary (furthest first = most interior)
-      // But keep clinic location first
+      // Sort by distance from clinic center (closest first after clinic itself)
+      // Then limit to MAX_INCLUSIONS
       const clinicPoint = inclusionPoints[0];
-      const otherPoints = inclusionPoints.slice(1).sort((a, b) => b.distFromBoundary - a.distFromBoundary);
+      const gridPoints = inclusionPoints.slice(1).sort((a, b) => a.distFromCenter - b.distFromCenter);
+      const limitedGridPoints = gridPoints.slice(0, MAX_INCLUSIONS - 1);
 
-      // Start with clinic, then add distributed additional points
-      const distributedInclusions: typeof inclusionPoints = [clinicPoint];
-      for (const point of otherPoints) {
-        const tooClose = distributedInclusions.some(existing =>
-          calculateDistance(existing.lat, existing.lng, point.lat, point.lng) < territorySize * 0.15
-        );
-        if (!tooClose) {
-          distributedInclusions.push(point);
-        }
-        if (distributedInclusions.length >= 10) break;
-      }
+      const distributedInclusions = [clinicPoint, ...limitedGridPoints];
 
-      const inclusionRadii = selectRadii(territorySize, distributedInclusions.length);
-
-      // Calculate the actual maximum inclusion radius (considering hard boundary caps)
-      const actualMaxInclusionRadius = distributedInclusions.length > 0
-        ? Math.max(...distributedInclusions.map((p, i) => Math.min(inclusionRadii[i] || 5, p.distFromBoundary)))
-        : 5;
-
-      // Minimum distance from territory boundary for exclusion centers:
-      // neutral zone extends (actualMaxInclusionRadius + neutralBuffer) from inclusion centers
-      // Plus 10 miles gap required from neutral zone outer edge
+      // For exclusion calculation
+      const actualMaxInclusionRadius = CIRCLE_RADIUS;
       const minExclusionDistance = actualMaxInclusionRadius + neutralBuffer + 10;
 
       setSaveStatus('generating boundary exclusion points...');
 
-      // OUTER LAYER: Build exclusion zone with 8 points:
-      // - 4 corner points (SW, SE, NW, NE) at 45mi radius, ~60-70mi from clinic center
-      // - 4 intermediate points (S, W, N, E) at 30mi radius, ~50-60mi from clinic center
+      // OUTER LAYER: Build exclusion zone with 4 corner points only (to stay within 25 total)
+      // Using 50mi radius for broad exclusion coverage
 
-      // 1 degree of latitude ≈ 69 miles
-      const milesToDegreesLat = (miles: number) => miles / 69;
-
-      // Longitude degrees per mile varies by latitude
-      const milesToDegreesLng = (miles: number, atLat: number) => miles / (69 * Math.cos(atLat * Math.PI / 180));
-
-      // Use clinic center as reference point
-      const clinicLat = lat;
-      const clinicLng = lng;
-
-      // Distance from clinic to corner exclusions (diagonal) - accounts for neutral zone + gap
+      // Distance from clinic to corner exclusions (diagonal)
       const cornerDistance = neutralBuffer + 50 + (territorySize / 2);
-      // Distance from clinic to intermediate exclusions (cardinal directions)
-      const cardinalDistance = neutralBuffer + 40 + (territorySize / 2);
 
-      // Build 8 exclusion points
+      // Build 4 corner exclusion points with 50mi radius
       const exclusionPoints: Array<{ lat: number; lng: number; radius: number; name: string }> = [];
 
-      // 4 CORNER points with 45mi radius (SW, SE, NW, NE)
       // Southwest
       exclusionPoints.push({
-        lat: clinicLat - milesToDegreesLat(cornerDistance * 0.7),
-        lng: clinicLng - milesToDegreesLng(cornerDistance * 0.7, clinicLat),
-        radius: 45,
+        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 50,
         name: 'Southwest'
       });
       // Southeast
       exclusionPoints.push({
-        lat: clinicLat - milesToDegreesLat(cornerDistance * 0.7),
-        lng: clinicLng + milesToDegreesLng(cornerDistance * 0.7, clinicLat),
-        radius: 45,
+        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 50,
         name: 'Southeast'
       });
       // Northwest
       exclusionPoints.push({
-        lat: clinicLat + milesToDegreesLat(cornerDistance * 0.7),
-        lng: clinicLng - milesToDegreesLng(cornerDistance * 0.7, clinicLat),
-        radius: 45,
+        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 50,
         name: 'Northwest'
       });
       // Northeast
       exclusionPoints.push({
-        lat: clinicLat + milesToDegreesLat(cornerDistance * 0.7),
-        lng: clinicLng + milesToDegreesLng(cornerDistance * 0.7, clinicLat),
-        radius: 45,
+        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 50,
         name: 'Northeast'
-      });
-
-      // 4 INTERMEDIATE points with 30mi radius (S, W, N, E)
-      // South
-      exclusionPoints.push({
-        lat: clinicLat - milesToDegreesLat(cardinalDistance),
-        lng: clinicLng,
-        radius: 30,
-        name: 'South'
-      });
-      // West
-      exclusionPoints.push({
-        lat: clinicLat,
-        lng: clinicLng - milesToDegreesLng(cardinalDistance, clinicLat),
-        radius: 30,
-        name: 'West'
-      });
-      // North
-      exclusionPoints.push({
-        lat: clinicLat + milesToDegreesLat(cardinalDistance),
-        lng: clinicLng,
-        radius: 30,
-        name: 'North'
-      });
-      // East
-      exclusionPoints.push({
-        lat: clinicLat,
-        lng: clinicLng + milesToDegreesLng(cardinalDistance, clinicLat),
-        radius: 30,
-        name: 'East'
       });
 
       const distributedExclusions = exclusionPoints;
@@ -745,67 +714,43 @@ export default function ClinicTerritoryManager() {
       const middleLayer: LayerCircle[] = [];     // Neutral zone - documentation only
       const outerLayer: LayerCircle[] = [];      // Exclusion donut - OUTSIDE territory
 
-      // Process inclusion points (inner layer)
+      // Process inclusion points - geocode all addresses for manual copy/paste
+      const clinicAddress = selectedClinic.address
+        ? `${selectedClinic.address}, ${selectedClinic.city || ''}, ${selectedClinic.state || ''}`.trim()
+        : await getAddress(lat, lng) || 'Clinic Address';
+
       for (let i = 0; i < distributedInclusions.length; i++) {
         const point = distributedInclusions[i];
 
-        // For the clinic location (first point), use the clinic's actual address
-        // For other points, geocode the address
+        setSaveStatus(`geocoding inclusions... ${i + 1}/${distributedInclusions.length}`);
+
         let address: string;
         let pointName: string;
+
         if (i === 0) {
-          // This is the clinic location
-          address = selectedClinic.address
-            ? `${selectedClinic.address}, ${selectedClinic.city || ''}, ${selectedClinic.state || ''}`.trim()
-            : await getAddress(point.lat, point.lng) || 'Clinic Address';
+          // Clinic location - use actual address
+          address = clinicAddress;
           pointName = `Clinic: ${selectedClinic.clinic_name}`;
         } else {
-          address = await getAddress(point.lat, point.lng) || 'Address not found';
-          pointName = `Include Zone ${i}`;
+          // Grid points - geocode to get real address
+          address = await getAddress(point.lat, point.lng) || `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
+          pointName = `Include ${i}`;
         }
 
-        // Use the pre-calculated distance to boundary (hard boundary cap)
-        const distToBoundary = point.distFromBoundary;
-
-        // Round to nearest allowed radius: 1, 3, 5, 10, 15, 25, 30, 40, 50
-        const allowedRadii = [1, 3, 5, 10, 15, 25, 30, 40, 50];
-        const roundToAllowed = (value: number): number => {
-          // Find the closest allowed value
-          return allowedRadii.reduce((prev, curr) =>
-            Math.abs(curr - value) < Math.abs(prev - value) ? curr : prev
-          );
-        };
-
-        // Cap the inclusion radius to not exceed the distance to boundary (hard boundary)
-        const proposedRadius = inclusionRadii[i] || 5;
-        const cappedRadius = Math.min(proposedRadius, distToBoundary);
-        const innerRadius = roundToAllowed(cappedRadius);
-        const neutralRadius = innerRadius + neutralBuffer;
-
-        // Inner layer - Include zone (sent to Facebook)
         innerLayer.push({
           name: pointName,
           address: address,
           latitude: point.lat,
           longitude: point.lng,
-          radius: innerRadius,
+          radius: CIRCLE_RADIUS,
           distance_unit: 'mile',
           layer_type: 'include'
         });
 
-        // Middle layer - Neutral zone (documentation only, NOT sent to Facebook)
-        // This represents the gap between inclusion edge and exclusion edge
-        middleLayer.push({
-          name: `Neutral Zone ${i + 1}`,
-          address: address,
-          latitude: point.lat,
-          longitude: point.lng,
-          radius: roundToAllowed(neutralRadius),
-          distance_unit: 'mile',
-          layer_type: 'neutral'
-        });
-
-        await new Promise(resolve => setTimeout(resolve, 100));
+        // Small delay to avoid rate limiting
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
       }
 
       // Process exclusion points (outer layer)
@@ -836,11 +781,18 @@ export default function ClinicTerritoryManager() {
       // Build simple text file
       const lines: string[] = [];
 
-      lines.push(`Facebook Audience Targeting`);
+      lines.push(`Facebook Audience Targeting - Polygon Coverage`);
       lines.push(`Clinic: ${selectedClinic.clinic_name} (${selectedClinic.clinic_id})`);
       lines.push(`Metro Type: ${selectedClinic.metro_type}`);
       lines.push(`Generated: ${new Date().toLocaleString()}`);
-      lines.push(`Neutral Buffer: ${neutralBuffer} miles (${metroType})`);
+      lines.push('');
+      lines.push(`COVERAGE SUMMARY`);
+      lines.push(`  Include Radius: ${CIRCLE_RADIUS} mi`);
+      lines.push(`  Exclude Radius: 50 mi`);
+      lines.push(`  Include Points: ${sortedInclusions.length}`);
+      lines.push(`  Exclude Points: ${sortedExclusions.length}`);
+      lines.push(`  Total Points: ${sortedInclusions.length + sortedExclusions.length} / 25 max`);
+      lines.push(`  Territory Size: ${territoryWidth.toFixed(1)} x ${territoryHeight.toFixed(1)} miles`);
       lines.push('');
 
       // Age targeting section
@@ -861,26 +813,32 @@ export default function ClinicTerritoryManager() {
       }
 
       lines.push('='.repeat(60));
-      lines.push('INCLUDE LOCATIONS');
+      lines.push(`INCLUDE LOCATIONS (${sortedInclusions.length} points)`);
       lines.push('='.repeat(60));
       lines.push('');
 
-      for (const loc of sortedInclusions) {
-        lines.push(`${loc.address}`);
-        lines.push(`  Radius: ${loc.radius} miles`);
+      for (let i = 0; i < sortedInclusions.length; i++) {
+        const loc = sortedInclusions[i];
+        lines.push(`${i + 1}. ${loc.address}`);
+        lines.push(`   Radius: ${loc.radius} mi`);
         lines.push('');
       }
 
       lines.push('='.repeat(60));
-      lines.push('EXCLUDE LOCATIONS');
+      lines.push(`EXCLUDE LOCATIONS (${sortedExclusions.length} points)`);
       lines.push('='.repeat(60));
       lines.push('');
 
-      for (const loc of sortedExclusions) {
-        lines.push(`${loc.address}`);
-        lines.push(`  Radius: ${loc.radius} miles`);
+      for (let i = 0; i < sortedExclusions.length; i++) {
+        const loc = sortedExclusions[i];
+        lines.push(`${i + 1}. ${loc.address}`);
+        lines.push(`   Radius: ${loc.radius} mi`);
         lines.push('');
       }
+
+      lines.push('='.repeat(60));
+      lines.push(`TOTAL POINTS: ${sortedInclusions.length + sortedExclusions.length} / 25`);
+      lines.push('='.repeat(60));
 
       const textContent = lines.join('\n');
       const blob = new Blob([textContent], { type: 'text/plain' });
