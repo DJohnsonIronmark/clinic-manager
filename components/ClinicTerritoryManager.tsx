@@ -653,47 +653,51 @@ export default function ClinicTerritoryManager() {
       const distributedInclusions = [clinicPoint, ...limitedGridPoints];
 
       // For exclusion calculation
-      const actualMaxInclusionRadius = CIRCLE_RADIUS;
-      const minExclusionDistance = actualMaxInclusionRadius + neutralBuffer + 10;
+      // Buffer zone: 10 miles between outer edge of inclusions and inner edge of exclusions
+      const BUFFER_ZONE = 10;
+      const EXCLUSION_RADIUS = 25; // Smaller radius for better control
+
+      // Calculate where exclusion centers need to be:
+      // - Territory extends (territorySize/2) from clinic
+      // - Inclusions extend CIRCLE_RADIUS beyond that at most
+      // - Then 10-mile buffer zone
+      // - Then exclusion inner edge starts
+      // So exclusion center = (territorySize/2) + CIRCLE_RADIUS + BUFFER_ZONE + EXCLUSION_RADIUS
+      const exclusionCenterDistance = (territorySize / 2) + CIRCLE_RADIUS + BUFFER_ZONE + EXCLUSION_RADIUS;
 
       setSaveStatus('generating boundary exclusion points...');
 
-      // OUTER LAYER: Build exclusion zone with 4 corner points only (to stay within 25 total)
-      // Using 50mi radius for broad exclusion coverage
-
-      // Distance from clinic to corner exclusions (diagonal)
-      const cornerDistance = neutralBuffer + 50 + (territorySize / 2);
-
-      // Build 4 corner exclusion points with 50mi radius
+      // OUTER LAYER: 4 cardinal direction exclusion points (N, S, E, W)
+      // Placed so their inner edge is 10 miles outside the territory
       const exclusionPoints: Array<{ lat: number; lng: number; radius: number; name: string }> = [];
 
-      // Southwest
+      // North
       exclusionPoints.push({
-        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 50,
-        name: 'Southwest'
+        lat: lat + milesToDegreesLat(exclusionCenterDistance),
+        lng: lng,
+        radius: EXCLUSION_RADIUS,
+        name: 'North'
       });
-      // Southeast
+      // South
       exclusionPoints.push({
-        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 50,
-        name: 'Southeast'
+        lat: lat - milesToDegreesLat(exclusionCenterDistance),
+        lng: lng,
+        radius: EXCLUSION_RADIUS,
+        name: 'South'
       });
-      // Northwest
+      // East
       exclusionPoints.push({
-        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 50,
-        name: 'Northwest'
+        lat: lat,
+        lng: lng + milesToDegreesLng(exclusionCenterDistance, lat),
+        radius: EXCLUSION_RADIUS,
+        name: 'East'
       });
-      // Northeast
+      // West
       exclusionPoints.push({
-        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 50,
-        name: 'Northeast'
+        lat: lat,
+        lng: lng - milesToDegreesLng(exclusionCenterDistance, lat),
+        radius: EXCLUSION_RADIUS,
+        name: 'West'
       });
 
       const distributedExclusions = exclusionPoints;
@@ -789,7 +793,8 @@ export default function ClinicTerritoryManager() {
       lines.push('');
       lines.push(`COVERAGE SUMMARY`);
       lines.push(`  Include Radius: ${CIRCLE_RADIUS} mi`);
-      lines.push(`  Exclude Radius: 50 mi`);
+      lines.push(`  Exclude Radius: ${EXCLUSION_RADIUS} mi`);
+      lines.push(`  Buffer Zone: ${BUFFER_ZONE} mi (between include and exclude)`);
       lines.push(`  Include Points: ${sortedInclusions.length}`);
       lines.push(`  Exclude Points: ${sortedExclusions.length}`);
       lines.push(`  Total Points: ${sortedInclusions.length + sortedExclusions.length} / 25 max`);
