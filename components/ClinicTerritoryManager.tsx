@@ -503,17 +503,19 @@ export default function ClinicTerritoryManager() {
 
   const getAddress = async (latitude: number, longitude: number): Promise<string | null> => {
     try {
+      // Include place, locality, neighborhood, and address types to handle remote areas
       const response = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address`
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address,neighborhood,locality,place`
       );
       const data = await response.json();
       if (data.features && data.features.length > 0) {
         return data.features[0].place_name;
       }
-      return null;
+      // Fallback to coordinates if no address found
+      return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
     } catch (error) {
       console.error('Geocoding error:', error);
-      return null;
+      return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
     }
   };
 
@@ -589,10 +591,9 @@ export default function ClinicTerritoryManager() {
       const NUM_EXCLUSIONS = 4;
       const MAX_INCLUSIONS = MAX_TOTAL_POINTS - NUM_EXCLUSIONS;
 
-      // Use 5-mile radius for better coverage with fewer points
-      // Grid spacing ~8 miles for slight overlap with 5-mile circles
-      const CIRCLE_RADIUS = 5;
-      const GRID_SPACING = 8;
+      // Use 1-mile radius with tight grid to better approximate the polygon shape
+      const CIRCLE_RADIUS = 1;
+      const GRID_SPACING = 1.5; // Slight overlap with 1-mile circles
 
       // Convert miles to degrees
       const milesToDegreesLat = (miles: number) => miles / 69;
@@ -643,10 +644,10 @@ export default function ClinicTerritoryManager() {
         rowIndex++;
       }
 
-      // Sort by distance from clinic center (closest first after clinic itself)
-      // Then limit to MAX_INCLUSIONS
+      // Sort by distance from boundary (closest to edge first for better polygon approximation)
+      // This prioritizes points that help define the polygon's outer shape
       const clinicPoint = inclusionPoints[0];
-      const gridPoints = inclusionPoints.slice(1).sort((a, b) => a.distFromCenter - b.distFromCenter);
+      const gridPoints = inclusionPoints.slice(1).sort((a, b) => a.distFromBoundary - b.distFromBoundary);
       const limitedGridPoints = gridPoints.slice(0, MAX_INCLUSIONS - 1);
 
       const distributedInclusions = [clinicPoint, ...limitedGridPoints];
