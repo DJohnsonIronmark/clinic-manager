@@ -504,22 +504,32 @@ export default function ClinicTerritoryManager() {
   const getAddress = async (latitude: number, longitude: number, requireStreetAddress: boolean = false): Promise<string | null> => {
     try {
       if (requireStreetAddress) {
-        // For exclusion points: search for nearest street address within 10 miles
-        // Use proximity bias and limit to addresses only
-        const response = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/address.json?access_token=${MAPBOX_TOKEN}&proximity=${longitude},${latitude}&types=address&limit=1`
+        // For exclusion points: try to find a street address first
+        const addressResponse = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address&limit=1`
         );
-        const data = await response.json();
-        if (data.features && data.features.length > 0) {
-          return data.features[0].place_name;
+        const addressData = await addressResponse.json();
+        if (addressData.features && addressData.features.length > 0) {
+          return addressData.features[0].place_name;
         }
-        // If no address found, try reverse geocoding for any POI or address
-        const reverseResponse = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=poi,address&limit=1`
+
+        // If no street address, try POI (businesses, landmarks)
+        const poiResponse = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=poi&limit=1`
         );
-        const reverseData = await reverseResponse.json();
-        if (reverseData.features && reverseData.features.length > 0) {
-          return reverseData.features[0].place_name;
+        const poiData = await poiResponse.json();
+        if (poiData.features && poiData.features.length > 0) {
+          return poiData.features[0].place_name;
+        }
+
+        // Fall back to locality/place (city/town name)
+        const placeResponse = await fetch(
+          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=locality,place&limit=1`
+        );
+        const placeData = await placeResponse.json();
+        if (placeData.features && placeData.features.length > 0) {
+          // Return city name with state for Meta recognition
+          return placeData.features[0].place_name;
         }
       }
 
