@@ -501,51 +501,19 @@ export default function ClinicTerritoryManager() {
     }
   };
 
-  const getAddress = async (latitude: number, longitude: number, requireStreetAddress: boolean = false): Promise<string | null> => {
+  const getAddress = async (latitude: number, longitude: number): Promise<string | null> => {
     try {
-      if (requireStreetAddress) {
-        // For exclusion points: try to find a street address first
-        const addressResponse = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address&limit=1`
-        );
-        const addressData = await addressResponse.json();
-        if (addressData.features && addressData.features.length > 0) {
-          return addressData.features[0].place_name;
-        }
-
-        // If no street address, try POI (businesses, landmarks)
-        const poiResponse = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=poi&limit=1`
-        );
-        const poiData = await poiResponse.json();
-        if (poiData.features && poiData.features.length > 0) {
-          return poiData.features[0].place_name;
-        }
-
-        // Fall back to locality/place (city/town name)
-        const placeResponse = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=locality,place&limit=1`
-        );
-        const placeData = await placeResponse.json();
-        if (placeData.features && placeData.features.length > 0) {
-          // Return city name with state for Meta recognition
-          return placeData.features[0].place_name;
-        }
-      }
-
-      // Standard reverse geocoding for inclusion points
       const response = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address,neighborhood,locality,place`
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address`
       );
       const data = await response.json();
       if (data.features && data.features.length > 0) {
         return data.features[0].place_name;
       }
-      // Fallback to coordinates if no address found
-      return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+      return null;
     } catch (error) {
       console.error('Geocoding error:', error);
-      return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+      return null;
     }
   };
 
@@ -683,51 +651,81 @@ export default function ClinicTerritoryManager() {
       const distributedInclusions = [clinicPoint, ...limitedGridPoints];
 
       // For exclusion calculation
-      // Buffer zone: 10 miles between outer edge of inclusions and inner edge of exclusions
-      const BUFFER_ZONE = 10;
-      const EXCLUSION_RADIUS = 25; // Smaller radius for better control
-
-      // Calculate where exclusion centers need to be:
-      // - Territory extends (territorySize/2) from clinic
-      // - Inclusions extend CIRCLE_RADIUS beyond that at most
-      // - Then 10-mile buffer zone
-      // - Then exclusion inner edge starts
-      // So exclusion center = (territorySize/2) + CIRCLE_RADIUS + BUFFER_ZONE + EXCLUSION_RADIUS
-      const exclusionCenterDistance = (territorySize / 2) + CIRCLE_RADIUS + BUFFER_ZONE + EXCLUSION_RADIUS;
+      const actualMaxInclusionRadius = CIRCLE_RADIUS;
+      const minExclusionDistance = actualMaxInclusionRadius + neutralBuffer + 10;
 
       setSaveStatus('generating boundary exclusion points...');
 
-      // OUTER LAYER: 4 cardinal direction exclusion points (N, S, E, W)
-      // Placed so their inner edge is 10 miles outside the territory
+      // OUTER LAYER: Build exclusion zone with 8 points:
+      // - 4 corner points (SW, SE, NW, NE) at 45mi radius
+      // - 4 intermediate points (S, W, N, E) at 30mi radius
+
+      // Distance from clinic to corner exclusions (diagonal)
+      const cornerDistance = neutralBuffer + 50 + (territorySize / 2);
+      // Distance from clinic to intermediate exclusions (cardinal directions)
+      const cardinalDistance = neutralBuffer + 40 + (territorySize / 2);
+
+      // Build 8 exclusion points
       const exclusionPoints: Array<{ lat: number; lng: number; radius: number; name: string }> = [];
 
-      // North
+      // 4 CORNER points with 45mi radius (SW, SE, NW, NE)
+      // Southwest
       exclusionPoints.push({
-        lat: lat + milesToDegreesLat(exclusionCenterDistance),
-        lng: lng,
-        radius: EXCLUSION_RADIUS,
-        name: 'North'
+        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 45,
+        name: 'Southwest'
       });
+      // Southeast
+      exclusionPoints.push({
+        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 45,
+        name: 'Southeast'
+      });
+      // Northwest
+      exclusionPoints.push({
+        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 45,
+        name: 'Northwest'
+      });
+      // Northeast
+      exclusionPoints.push({
+        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
+        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
+        radius: 45,
+        name: 'Northeast'
+      });
+
+      // 4 INTERMEDIATE points with 30mi radius (S, W, N, E)
       // South
       exclusionPoints.push({
-        lat: lat - milesToDegreesLat(exclusionCenterDistance),
+        lat: lat - milesToDegreesLat(cardinalDistance),
         lng: lng,
-        radius: EXCLUSION_RADIUS,
+        radius: 30,
         name: 'South'
-      });
-      // East
-      exclusionPoints.push({
-        lat: lat,
-        lng: lng + milesToDegreesLng(exclusionCenterDistance, lat),
-        radius: EXCLUSION_RADIUS,
-        name: 'East'
       });
       // West
       exclusionPoints.push({
         lat: lat,
-        lng: lng - milesToDegreesLng(exclusionCenterDistance, lat),
-        radius: EXCLUSION_RADIUS,
+        lng: lng - milesToDegreesLng(cardinalDistance, lat),
+        radius: 30,
         name: 'West'
+      });
+      // North
+      exclusionPoints.push({
+        lat: lat + milesToDegreesLat(cardinalDistance),
+        lng: lng,
+        radius: 30,
+        name: 'North'
+      });
+      // East
+      exclusionPoints.push({
+        lat: lat,
+        lng: lng + milesToDegreesLng(cardinalDistance, lat),
+        radius: 30,
+        name: 'East'
       });
 
       const distributedExclusions = exclusionPoints;
@@ -793,10 +791,7 @@ export default function ClinicTerritoryManager() {
         const point = distributedExclusions[i];
         if (!point) continue;
 
-        setSaveStatus(`geocoding exclusions... ${i + 1}/${distributedExclusions.length}`);
-
-        // Use requireStreetAddress=true to find nearest actual street address
-        const address = await getAddress(point.lat, point.lng, true);
+        const address = await getAddress(point.lat, point.lng);
 
         // Outer layer - Exclusion
         outerLayer.push({
@@ -826,8 +821,7 @@ export default function ClinicTerritoryManager() {
       lines.push('');
       lines.push(`COVERAGE SUMMARY`);
       lines.push(`  Include Radius: ${CIRCLE_RADIUS} mi`);
-      lines.push(`  Exclude Radius: ${EXCLUSION_RADIUS} mi`);
-      lines.push(`  Buffer Zone: ${BUFFER_ZONE} mi (between include and exclude)`);
+      lines.push(`  Exclude Radii: 45 mi (corners) / 30 mi (cardinals)`);
       lines.push(`  Include Points: ${sortedInclusions.length}`);
       lines.push(`  Exclude Points: ${sortedExclusions.length}`);
       lines.push(`  Total Points: ${sortedInclusions.length + sortedExclusions.length} / 25 max`);
