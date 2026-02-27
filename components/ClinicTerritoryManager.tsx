@@ -504,13 +504,24 @@ export default function ClinicTerritoryManager() {
 
   const getAddress = async (latitude: number, longitude: number): Promise<string | null> => {
     try {
-      const response = await fetch(
+      // First try to get a street address
+      const addressResponse = await fetch(
         `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address`
       );
-      const data = await response.json();
-      if (data.features && data.features.length > 0) {
-        return data.features[0].place_name;
+      const addressData = await addressResponse.json();
+      if (addressData.features && addressData.features.length > 0) {
+        return addressData.features[0].place_name;
       }
+
+      // Fall back to any location type (place, locality, poi, etc.)
+      const fallbackResponse = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}`
+      );
+      const fallbackData = await fallbackResponse.json();
+      if (fallbackData.features && fallbackData.features.length > 0) {
+        return fallbackData.features[0].place_name;
+      }
+
       return null;
     } catch (error) {
       console.error('Geocoding error:', error);
