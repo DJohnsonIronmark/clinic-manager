@@ -491,19 +491,30 @@ export default function ClinicTerritoryManager() {
     }
 
     if (geometry) {
+      // Ensure geometry is a Polygon (not MultiPolygon)
+      let polygonGeometry = geometry;
+      if (geometry.type === 'MultiPolygon') {
+        // Use the first polygon from MultiPolygon
+        polygonGeometry = {
+          type: 'Polygon' as const,
+          coordinates: (geometry.coordinates as number[][][][])[0]
+        };
+      }
+
       const feature = {
         type: 'Feature' as const,
-        geometry: geometry,
+        geometry: polygonGeometry,
         properties: {}
       };
       const featureIds = draw.current.add(feature as GeoJSON.Feature);
 
-      // Select the feature to enable vertex editing (click and drag)
-      // Use setTimeout to ensure the feature is fully added before selecting
+      // Select the feature in simple_select mode first (shows filled polygon)
+      // User can double-click to enter direct_select mode for vertex editing
       if (featureIds && featureIds.length > 0) {
         setTimeout(() => {
           if (draw.current) {
-            draw.current.changeMode('direct_select', { featureId: featureIds[0] });
+            // Select the feature to highlight it
+            draw.current.changeMode('simple_select', { featureIds: [featureIds[0]] });
           }
         }, 100);
       }
@@ -1367,9 +1378,9 @@ User request: ${userMessage}`;
                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
                     <p className="text-xs text-blue-800 font-medium mb-1">Editing Mode</p>
                     <p className="text-xs text-blue-700">
-                      • Drag vertices (white circles) to reshape<br/>
-                      • Drag midpoints (blue dots) to add vertices<br/>
-                      • Or use chat below for AI-assisted edits
+                      • Double-click polygon to edit vertices<br/>
+                      • Drag vertices to reshape boundary<br/>
+                      • Click outside to deselect, then Save
                     </p>
                   </div>
 
