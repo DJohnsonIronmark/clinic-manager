@@ -80,6 +80,9 @@ export default function ClinicTerritoryManager() {
   const [editChatInput, setEditChatInput] = useState('');
   const [editChatMessages, setEditChatMessages] = useState<Array<{role: 'user' | 'assistant', content: string}>>([]);
   const [editChatLoading, setEditChatLoading] = useState(false);
+  const [showAddLocation, setShowAddLocation] = useState(false);
+  const [newLocationForm, setNewLocationForm] = useState({ clinic_name: '', clinic_id: '', address: '' });
+  const [addingLocation, setAddingLocation] = useState(false);
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const editChatRef = useRef<HTMLDivElement>(null);
@@ -615,6 +618,60 @@ export default function ClinicTerritoryManager() {
       console.error('Error loading isochrone:', error);
       alert('Failed to load isochrone: ' + (error as Error).message);
       setSaveStatus('');
+    }
+  };
+
+  // Handle adding a new location
+  const handleAddLocation = async () => {
+    const { clinic_name, clinic_id, address } = newLocationForm;
+
+    if (!clinic_name.trim() || !clinic_id.trim() || !address.trim()) {
+      alert('Please fill in all fields');
+      return;
+    }
+
+    setAddingLocation(true);
+
+    try {
+      const response = await fetch('/api/clinics/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clinic_name: clinic_name.trim(),
+          clinic_id: clinic_id.trim(),
+          address: address.trim(),
+          resolve_overlaps: true
+        })
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Failed to add location');
+      }
+
+      alert(result.message);
+
+      // Reset form and close panel
+      setNewLocationForm({ clinic_name: '', clinic_id: '', address: '' });
+      setShowAddLocation(false);
+
+      // Reload clinics to show the new one
+      loadClinics();
+
+      // Fly to the new location
+      if (result.clinic?.longitude && result.clinic?.latitude && map.current) {
+        map.current.flyTo({
+          center: [result.clinic.longitude, result.clinic.latitude],
+          zoom: 10,
+          duration: 2000
+        });
+      }
+
+    } catch (error) {
+      alert('Error adding location: ' + (error as Error).message);
+    } finally {
+      setAddingLocation(false);
     }
   };
 
@@ -1359,6 +1416,13 @@ User request: ${userMessage}`;
           >
             Data Assistant
           </Link>
+
+          <button
+            onClick={() => setShowAddLocation(true)}
+            className="mt-2 w-full bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600"
+          >
+            + Add New Location
+          </button>
         </div>
 
         <div className="p-4">
@@ -1528,7 +1592,7 @@ User request: ${userMessage}`;
           </div>
         )}
 
-        {!selectedClinic && !showOverlapPanel && (
+        {!selectedClinic && !showOverlapPanel && !showAddLocation && (
           <div className="absolute top-4 left-4 bg-white rounded-lg shadow-xl p-4 max-w-md">
             <div className="flex items-start gap-3">
               <div className="text-blue-500">
@@ -1542,6 +1606,90 @@ User request: ${userMessage}`;
                 {loadingStatus && (
                   <p className="text-sm text-blue-600 mt-2 font-medium">{loadingStatus}</p>
                 )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showAddLocation && (
+          <div className="absolute top-4 left-4 bg-white rounded-lg shadow-xl p-6 w-96">
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h2 className="text-xl font-bold text-gray-800">Add New Location</h2>
+                <p className="text-sm text-gray-600 mt-1">Create a clinic with drive-time boundaries</p>
+              </div>
+              <button
+                onClick={() => setShowAddLocation(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <XIcon />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Location Number (ID)
+                </label>
+                <input
+                  type="text"
+                  value={newLocationForm.clinic_id}
+                  onChange={(e) => setNewLocationForm(f => ({ ...f, clinic_id: e.target.value }))}
+                  placeholder="e.g., 12345"
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Clinic Name
+                </label>
+                <input
+                  type="text"
+                  value={newLocationForm.clinic_name}
+                  onChange={(e) => setNewLocationForm(f => ({ ...f, clinic_name: e.target.value }))}
+                  placeholder="e.g., The Joint Chiropractic Downtown"
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Address
+                </label>
+                <input
+                  type="text"
+                  value={newLocationForm.address}
+                  onChange={(e) => setNewLocationForm(f => ({ ...f, address: e.target.value }))}
+                  placeholder="e.g., 123 Main St, Dallas, TX 75201"
+                  className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <p className="text-xs text-blue-800">
+                  <strong>What happens:</strong><br/>
+                  • Address will be geocoded to coordinates<br/>
+                  • Drive-time isochrones (10/15/20/30 min) will be generated<br/>
+                  • Metro type will be auto-detected<br/>
+                  • Boundary will be set based on metro type
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowAddLocation(false)}
+                  className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAddLocation}
+                  disabled={addingLocation}
+                  className="flex-1 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 disabled:bg-gray-400"
+                >
+                  {addingLocation ? 'Creating...' : 'Create Location'}
+                </button>
               </div>
             </div>
           </div>
