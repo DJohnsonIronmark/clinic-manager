@@ -456,6 +456,7 @@ export default function ClinicTerritoryManager() {
       map.current.removeControl(draw.current);
     }
 
+    // @ts-expect-error - MapboxDraw types don't include all valid options
     draw.current = new MapboxDraw({
       displayControlsDefault: false,
       controls: {
@@ -463,7 +464,7 @@ export default function ClinicTerritoryManager() {
         trash: true
       },
       defaultMode: 'simple_select'
-    } as MapboxDraw.DrawOptions);
+    });
 
     map.current.addControl(draw.current);
 
