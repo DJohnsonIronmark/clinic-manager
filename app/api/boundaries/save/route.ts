@@ -17,62 +17,39 @@ export async function POST(request: NextRequest) {
 
     const geometryJson = JSON.stringify(geometry);
 
-    // Use PostgREST RPC to call a function that updates the geom column
-    // First try to update using ST_GeomFromGeoJSON via raw SQL
-    const sqlQuery = `
-      UPDATE clinic_territories
-      SET geom = ST_SetSRID(ST_GeomFromGeoJSON('${geometryJson.replace(/'/g, "''")}'), 4326)
-      WHERE clinic_id = '${clinic_id}'
-      RETURNING clinic_id
-    `;
-
-    // Execute via Supabase's SQL endpoint (requires service role key)
-    const response = await fetch(`${supabaseUrl}/rest/v1/rpc/exec_sql`, {
+    // Try calling the update_clinic_geom RPC function
+    const rpcResponse = await fetch(`${supabaseUrl}/rest/v1/rpc/update_clinic_geom`, {
       method: 'POST',
       headers: {
         'apikey': supabaseServiceKey,
         'Authorization': `Bearer ${supabaseServiceKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ query: sqlQuery })
+      body: JSON.stringify({
+        p_clinic_id: clinic_id,
+        p_geojson: geometryJson
+      })
     });
 
-    if (!response.ok) {
-      // exec_sql RPC might not exist, try alternative approach
-      // Update the geom column directly - PostgREST should accept GeoJSON for geometry columns
-      const directResponse = await fetch(
-        `${supabaseUrl}/rest/v1/clinic_territories?clinic_id=eq.${clinic_id}`,
-        {
-          method: 'PATCH',
-          headers: {
-            'apikey': supabaseServiceKey,
-            'Authorization': `Bearer ${supabaseServiceKey}`,
-            'Content-Type': 'application/json',
-            'Prefer': 'return=minimal'
-          },
-          body: JSON.stringify({
-            // PostgREST accepts geometry as GeoJSON string for geometry columns
-            geom: geometryJson
-          })
-        }
-      );
-
-      if (!directResponse.ok) {
-        const errorText = await directResponse.text();
-
-        // If geom update fails, this is likely because geom is also generated or has constraints
-        // Return specific error for debugging
-        console.error('Direct geom update failed:', errorText);
-        return NextResponse.json(
-          { error: `Cannot update boundary. The geom column may be read-only. Error: ${errorText}` },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json({ success: true, method: 'direct' });
+    if (rpcResponse.ok) {
+      return NextResponse.json({ success: true, method: 'rpc' });
     }
 
-    return NextResponse.json({ success: true, method: 'sql' });
+    const rpcError = await rpcResponse.text();
+
+    // If RPC doesn't exist, provide instructions
+    if (rpcError.includes('function') || rpcError.includes('does not exist')) {
+      return NextResponse.json({
+        error: 'Database function not found. Please run the SQL script in scripts/create_update_boundary_function.sql via Supabase SQL Editor.',
+        details: rpcError
+      }, { status: 500 });
+    }
+
+    console.error('RPC error:', rpcError);
+    return NextResponse.json({
+      error: `Failed to save boundary: ${rpcError}`
+    }, { status: 500 });
+
   } catch (error) {
     console.error('Save boundary error:', error);
     return NextResponse.json(
