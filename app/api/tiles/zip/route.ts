@@ -10,37 +10,8 @@ export async function GET(request: NextRequest) {
 
   try {
     // Census Bureau TIGERweb ArcGIS REST service
-    // Layer 2 in tigerWMS_ACS2023 is ZIP Code Tabulation Areas (ZCTA5)
-    // Using dynamicLayers to enable labels
-    const dynamicLayers = JSON.stringify([
-      {
-        id: 2,
-        source: { type: 'mapLayer', mapLayerId: 2 },
-        drawingInfo: {
-          showLabels: true,
-          labelingInfo: [
-            {
-              labelPlacement: 'esriServerPolygonPlacementAlwaysHorizontal',
-              labelExpression: '[ZCTA5]',
-              symbol: {
-                type: 'esriTS',
-                color: [50, 50, 50, 255],
-                font: {
-                  family: 'Arial',
-                  size: 10,
-                  weight: 'bold'
-                },
-                haloColor: [255, 255, 255, 255],
-                haloSize: 1.5
-              },
-              minScale: 500000,
-              maxScale: 0
-            }
-          ]
-        }
-      }
-    ]);
-
+    // Layer 2: ZIP Code Tabulation Areas (ZCTA5) - boundaries
+    // Layer 3: ZIP Code Tabulation Areas Labels - zip code numbers
     const params = new URLSearchParams({
       bbox: bbox,
       bboxSR: '3857',
@@ -48,7 +19,7 @@ export async function GET(request: NextRequest) {
       size: '512,512',
       format: 'png32',
       transparent: 'true',
-      dynamicLayers: dynamicLayers,
+      layers: 'show:2,3',  // Show both boundaries and labels
       dpi: '96',
       f: 'image',
     });
