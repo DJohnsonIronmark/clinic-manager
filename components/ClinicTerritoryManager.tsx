@@ -77,8 +77,12 @@ export default function ClinicTerritoryManager() {
   const [states, setStates] = useState<string[]>([]);
   const [loadingStatus, setLoadingStatus] = useState('');
   const [showZipCodes, setShowZipCodes] = useState(false);
+  const [editChatInput, setEditChatInput] = useState('');
+  const [editChatMessages, setEditChatMessages] = useState<Array<{role: 'user' | 'assistant', content: string}>>([]);
+  const [editChatLoading, setEditChatLoading] = useState(false);
 
   const mapContainer = useRef<HTMLDivElement>(null);
+  const editChatRef = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const draw = useRef<MapboxDraw | null>(null);
 
@@ -456,9 +460,60 @@ export default function ClinicTerritoryManager() {
       displayControlsDefault: false,
       controls: {
         polygon: true,
-        trash: true
+        trash: true,
+        point: false,
+        line_string: false,
+        combine_features: false,
+        uncombine_features: false
       },
-      defaultMode: 'draw_polygon'
+      defaultMode: 'simple_select',
+      styles: [
+        // Polygon fill - active
+        {
+          id: 'gl-draw-polygon-fill-active',
+          type: 'fill',
+          filter: ['all', ['==', 'active', 'true'], ['==', '$type', 'Polygon']],
+          paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.3 }
+        },
+        // Polygon fill - inactive
+        {
+          id: 'gl-draw-polygon-fill-inactive',
+          type: 'fill',
+          filter: ['all', ['==', 'active', 'false'], ['==', '$type', 'Polygon']],
+          paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.2 }
+        },
+        // Polygon outline
+        {
+          id: 'gl-draw-polygon-stroke-active',
+          type: 'line',
+          filter: ['all', ['==', '$type', 'Polygon']],
+          paint: { 'line-color': '#3b82f6', 'line-width': 3 }
+        },
+        // Vertex points
+        {
+          id: 'gl-draw-polygon-and-line-vertex-active',
+          type: 'circle',
+          filter: ['all', ['==', 'meta', 'vertex'], ['==', '$type', 'Point']],
+          paint: {
+            'circle-radius': 6,
+            'circle-color': '#fff',
+            'circle-stroke-color': '#3b82f6',
+            'circle-stroke-width': 2
+          }
+        },
+        // Midpoints
+        {
+          id: 'gl-draw-polygon-midpoint',
+          type: 'circle',
+          filter: ['all', ['==', 'meta', 'midpoint'], ['==', '$type', 'Point']],
+          paint: {
+            'circle-radius': 4,
+            'circle-color': '#3b82f6',
+            'circle-stroke-color': '#fff',
+            'circle-stroke-width': 1
+          }
+        }
+      ]
     });
 
     map.current.addControl(draw.current);
@@ -468,12 +523,114 @@ export default function ClinicTerritoryManager() {
     if (geometry) {
       const feature = {
         type: 'Feature' as const,
-        geometry: geometry
+        geometry: geometry,
+        properties: {}
       };
-      draw.current.add(feature as GeoJSON.Feature);
+      const featureIds = draw.current.add(feature as GeoJSON.Feature);
+
+      // Select the feature to enable vertex editing (click and drag)
+      if (featureIds && featureIds.length > 0) {
+        draw.current.changeMode('direct_select', { featureId: featureIds[0] });
+      }
     }
 
+    // Clear previous chat messages when starting new edit session
+    setEditChatMessages([]);
+    setEditChatInput('');
     setIsEditing(true);
+  };
+
+  // Handle chat commands for boundary editing
+  const handleEditChat = async () => {
+    if (!editChatInput.trim() || editChatLoading || !selectedClinic || !draw.current) return;
+
+    const userMessage = editChatInput.trim();
+    setEditChatInput('');
+    setEditChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    setEditChatLoading(true);
+
+    try {
+      // Get current boundary from draw control
+      const drawData = draw.current.getAll();
+      const currentGeometry = drawData.features.length > 0 ? drawData.features[0].geometry : null;
+
+      // Build context for the chat
+      const contextMessage = `[BOUNDARY EDIT MODE]
+Clinic: "${selectedClinic.clinic_name}" (ID: ${selectedClinic.clinic_id})
+Location: ${selectedClinic.city}, ${selectedClinic.state}
+Metro Type: ${selectedClinic.metro_type}
+Coordinates: ${selectedClinic.latitude}, ${selectedClinic.longitude}
+Current Boundary: ${currentGeometry ? JSON.stringify(currentGeometry).substring(0, 500) + '...' : 'None'}
+
+The user wants to modify the clinic's territory boundary. Interpret their request and respond with either:
+1. A JSON boundary modification command in this format: {"action": "modify_boundary", "geometry": <GeoJSON geometry>}
+2. Or a helpful response explaining what you understood and asking for clarification.
+
+For expansion/contraction requests, calculate new coordinates based on the direction and distance specified.
+For "include zip code X" requests, you would need to expand the boundary to include that area.
+For "set drive time to X minutes", suggest using the appropriate isochrone from raw_geojson.
+
+User request: ${userMessage}`;
+
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            ...editChatMessages.map(m => ({ role: m.role, content: m.content })),
+            { role: 'user', content: contextMessage }
+          ],
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to get response');
+      }
+
+      const data = await response.json();
+      const assistantMessage = data.message?.content || 'No response received';
+
+      // Check if the response contains a boundary modification command
+      const jsonMatch = assistantMessage.match(/\{"action":\s*"modify_boundary".*?"geometry":\s*(\{.*\})\}/s);
+      if (jsonMatch) {
+        try {
+          const newGeometry = JSON.parse(jsonMatch[1]);
+          // Clear existing features and add the new one
+          draw.current.deleteAll();
+          const featureIds = draw.current.add({
+            type: 'Feature',
+            geometry: newGeometry,
+            properties: {}
+          } as GeoJSON.Feature);
+
+          if (featureIds && featureIds.length > 0) {
+            draw.current.changeMode('direct_select', { featureId: featureIds[0] });
+          }
+
+          setEditChatMessages(prev => [...prev, {
+            role: 'assistant',
+            content: 'Boundary updated! You can continue to drag vertices to adjust, or click "Save Boundary" when done.'
+          }]);
+        } catch {
+          setEditChatMessages(prev => [...prev, { role: 'assistant', content: assistantMessage }]);
+        }
+      } else {
+        setEditChatMessages(prev => [...prev, { role: 'assistant', content: assistantMessage }]);
+      }
+
+      // Scroll to bottom of chat
+      setTimeout(() => {
+        editChatRef.current?.scrollTo({ top: editChatRef.current.scrollHeight, behavior: 'smooth' });
+      }, 100);
+
+    } catch (err) {
+      setEditChatMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `Error: ${err instanceof Error ? err.message : 'Failed to process request'}`
+      }]);
+    } finally {
+      setEditChatLoading(false);
+    }
   };
 
   const saveBoundary = async () => {
@@ -1212,6 +1369,79 @@ export default function ClinicTerritoryManager() {
                 </>
               ) : (
                 <>
+                  {/* Editing instructions */}
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
+                    <p className="text-xs text-blue-800 font-medium mb-1">Editing Mode</p>
+                    <p className="text-xs text-blue-700">
+                      • Drag vertices (white circles) to reshape<br/>
+                      • Drag midpoints (blue dots) to add vertices<br/>
+                      • Or use chat below for AI-assisted edits
+                    </p>
+                  </div>
+
+                  {/* Chat interface for boundary editing */}
+                  <div className="border border-gray-200 rounded-lg mb-3">
+                    <div className="bg-gray-50 px-3 py-2 border-b border-gray-200">
+                      <p className="text-xs font-medium text-gray-700">AI Boundary Assistant</p>
+                    </div>
+
+                    {/* Chat messages */}
+                    <div
+                      ref={editChatRef}
+                      className="max-h-32 overflow-y-auto p-2 space-y-2"
+                    >
+                      {editChatMessages.length === 0 && (
+                        <p className="text-xs text-gray-400 italic">
+                          Try: &quot;Expand 2 miles north&quot; or &quot;Use 30-minute drive time&quot;
+                        </p>
+                      )}
+                      {editChatMessages.map((msg, idx) => (
+                        <div
+                          key={idx}
+                          className={`text-xs p-2 rounded ${
+                            msg.role === 'user'
+                              ? 'bg-blue-100 text-blue-800 ml-4'
+                              : 'bg-gray-100 text-gray-700 mr-4'
+                          }`}
+                        >
+                          {msg.content}
+                        </div>
+                      ))}
+                      {editChatLoading && (
+                        <div className="text-xs p-2 rounded bg-gray-100 text-gray-500 mr-4 italic">
+                          Thinking...
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Chat input */}
+                    <div className="p-2 border-t border-gray-200">
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={editChatInput}
+                          onChange={(e) => setEditChatInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleEditChat();
+                            }
+                          }}
+                          placeholder="Describe boundary change..."
+                          disabled={editChatLoading}
+                          className="flex-1 text-xs px-2 py-1.5 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
+                        />
+                        <button
+                          onClick={handleEditChat}
+                          disabled={editChatLoading || !editChatInput.trim()}
+                          className="px-3 py-1.5 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                        >
+                          Send
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   <button
                     onClick={saveBoundary}
                     disabled={saveStatus === 'saving'}
