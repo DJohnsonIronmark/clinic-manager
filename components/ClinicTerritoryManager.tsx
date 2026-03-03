@@ -633,31 +633,23 @@ User request: ${userMessage}`;
     }
 
     const newGeometry = data.features[0].geometry;
-    const updatedGeoJSON = {
-      type: 'Feature',
-      geometry: newGeometry,
-      properties: {
-        clinic_id: selectedClinic.clinic_id,
-        clinic_name: selectedClinic.clinic_name,
-        last_edited: new Date().toISOString()
-      }
-    };
 
     try {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/clinic_territories?clinic_id=eq.${selectedClinic.clinic_id}`, {
-        method: 'PATCH',
+      // Use our custom save endpoint that handles PostGIS geometry
+      const response = await fetch('/api/boundaries/save', {
+        method: 'POST',
         headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
           'Content-Type': 'application/json',
-          'Prefer': 'return=minimal'
         },
         body: JSON.stringify({
-          geojson: updatedGeoJSON
+          clinic_id: selectedClinic.clinic_id,
+          geometry: newGeometry
         })
       });
 
-      if (response.ok) {
+      const result = await response.json();
+
+      if (response.ok && result.success) {
         setSaveStatus('success');
         setIsEditing(false);
         if (draw.current && map.current) {
@@ -678,8 +670,7 @@ User request: ${userMessage}`;
         }, 2000);
       } else {
         setSaveStatus('error');
-        const errorText = await response.text();
-        alert('Failed to save boundary: ' + errorText);
+        alert('Failed to save boundary: ' + (result.error || 'Unknown error'));
       }
     } catch (error) {
       console.error('Error saving boundary:', error);
