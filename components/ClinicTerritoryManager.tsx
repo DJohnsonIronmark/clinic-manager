@@ -540,7 +540,7 @@ User request: ${userMessage}`;
       const assistantMessage = data.message?.content || 'No response received';
 
       // Check if the response contains a boundary modification command
-      const jsonMatch = assistantMessage.match(/\{"action":\s*"modify_boundary".*?"geometry":\s*(\{.*\})\}/s);
+      const jsonMatch = assistantMessage.match(/\{"action":\s*"modify_boundary"[\s\S]*?"geometry":\s*(\{[\s\S]*\})\}/);
       if (jsonMatch) {
         try {
           const newGeometry = JSON.parse(jsonMatch[1]);
