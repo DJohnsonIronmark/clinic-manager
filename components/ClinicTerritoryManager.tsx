@@ -538,6 +538,86 @@ export default function ClinicTerritoryManager() {
     setIsEditing(true);
   };
 
+  // Select a specific isochrone preset from raw_geojson
+  const selectIsochronePreset = async (isochroneIndex: number) => {
+    if (!selectedClinic || !draw.current) return;
+
+    setSaveStatus('Loading isochrone...');
+
+    try {
+      // Fetch the clinic's raw_geojson which contains all isochrones
+      const response = await fetch(
+        `${SUPABASE_URL}/rest/v1/clinic_territories?clinic_id=eq.${selectedClinic.clinic_id}&select=raw_geojson`,
+        {
+          headers: {
+            'apikey': SUPABASE_KEY,
+            'Authorization': `Bearer ${SUPABASE_KEY}`,
+          }
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch isochrones');
+      }
+
+      const data = await response.json();
+      if (!data[0]?.raw_geojson) {
+        alert('No isochrone data available for this clinic');
+        setSaveStatus('');
+        return;
+      }
+
+      const rawGeojson = typeof data[0].raw_geojson === 'string'
+        ? JSON.parse(data[0].raw_geojson)
+        : data[0].raw_geojson;
+
+      if (rawGeojson.type !== 'FeatureCollection' || !rawGeojson.features?.length) {
+        alert('Invalid isochrone data format');
+        setSaveStatus('');
+        return;
+      }
+
+      // Get the requested isochrone (0=30min, 1=20min, 2=15min, 3=10min)
+      const feature = rawGeojson.features[isochroneIndex];
+      if (!feature?.geometry) {
+        alert(`Isochrone ${isochroneIndex} not available`);
+        setSaveStatus('');
+        return;
+      }
+
+      let geometry = feature.geometry;
+
+      // Convert MultiPolygon to Polygon if needed
+      if (geometry.type === 'MultiPolygon') {
+        geometry = {
+          type: 'Polygon',
+          coordinates: geometry.coordinates[0]
+        };
+      }
+
+      // Clear existing and add new
+      draw.current.deleteAll();
+      const featureIds = draw.current.add({
+        type: 'Feature',
+        geometry: geometry,
+        properties: {}
+      } as GeoJSON.Feature);
+
+      if (featureIds?.length > 0) {
+        draw.current.changeMode('simple_select', { featureIds: [featureIds[0]] });
+      }
+
+      const labels = ['30-minute', '20-minute', '15-minute', '10-minute'];
+      setSaveStatus(`Loaded ${labels[isochroneIndex]} drive time`);
+      setTimeout(() => setSaveStatus(''), 2000);
+
+    } catch (error) {
+      console.error('Error loading isochrone:', error);
+      alert('Failed to load isochrone: ' + (error as Error).message);
+      setSaveStatus('');
+    }
+  };
+
   // Handle chat commands for boundary editing
   const handleEditChat = async () => {
     if (!editChatInput.trim() || editChatLoading || !selectedClinic || !draw.current) return;
@@ -1374,78 +1454,47 @@ User request: ${userMessage}`;
                 </>
               ) : (
                 <>
-                  {/* Editing instructions */}
+                  {/* Drive Time Presets */}
                   <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
-                    <p className="text-xs text-blue-800 font-medium mb-1">Editing Mode</p>
-                    <p className="text-xs text-blue-700">
-                      • Double-click polygon to edit vertices<br/>
-                      • Drag vertices to reshape boundary<br/>
-                      • Click outside to deselect, then Save
+                    <p className="text-xs text-blue-800 font-medium mb-2">Select Drive Time Boundary</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { label: '10 min', index: 3, type: 'Urban' },
+                        { label: '15 min', index: 2, type: 'Urban' },
+                        { label: '20 min', index: 1, type: 'Suburban' },
+                        { label: '30 min', index: 0, type: 'Rural' },
+                      ].map((option) => (
+                        <button
+                          key={option.index}
+                          onClick={() => selectIsochronePreset(option.index)}
+                          className={`px-2 py-1.5 text-xs rounded border ${
+                            selectedClinic?.metro_type === option.type
+                              ? 'bg-blue-500 text-white border-blue-500'
+                              : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                          }`}
+                        >
+                          {option.label}
+                          {selectedClinic?.metro_type === option.type && ' ✓'}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">
+                      Current: {selectedClinic?.metro_type || 'Unknown'} metro type
                     </p>
                   </div>
 
-                  {/* Chat interface for boundary editing */}
-                  <div className="border border-gray-200 rounded-lg mb-3">
-                    <div className="bg-gray-50 px-3 py-2 border-b border-gray-200">
-                      <p className="text-xs font-medium text-gray-700">AI Boundary Assistant</p>
-                    </div>
-
-                    {/* Chat messages */}
-                    <div
-                      ref={editChatRef}
-                      className="max-h-32 overflow-y-auto p-2 space-y-2"
-                    >
-                      {editChatMessages.length === 0 && (
-                        <p className="text-xs text-gray-400 italic">
-                          Try: &quot;Expand 2 miles north&quot; or &quot;Use 30-minute drive time&quot;
-                        </p>
-                      )}
-                      {editChatMessages.map((msg, idx) => (
-                        <div
-                          key={idx}
-                          className={`text-xs p-2 rounded ${
-                            msg.role === 'user'
-                              ? 'bg-blue-100 text-blue-800 ml-4'
-                              : 'bg-gray-100 text-gray-700 mr-4'
-                          }`}
-                        >
-                          {msg.content}
-                        </div>
-                      ))}
-                      {editChatLoading && (
-                        <div className="text-xs p-2 rounded bg-gray-100 text-gray-500 mr-4 italic">
-                          Thinking...
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Chat input */}
-                    <div className="p-2 border-t border-gray-200">
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={editChatInput}
-                          onChange={(e) => setEditChatInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              handleEditChat();
-                            }
-                          }}
-                          placeholder="Describe boundary change..."
-                          disabled={editChatLoading}
-                          className="flex-1 text-xs px-2 py-1.5 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:bg-gray-100"
-                        />
-                        <button
-                          onClick={handleEditChat}
-                          disabled={editChatLoading || !editChatInput.trim()}
-                          className="px-3 py-1.5 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
-                        >
-                          Send
-                        </button>
-                      </div>
-                    </div>
-                  </div>
+                  {/* Draw New Option */}
+                  <button
+                    onClick={() => {
+                      if (draw.current) {
+                        draw.current.deleteAll();
+                        draw.current.changeMode('draw_polygon');
+                      }
+                    }}
+                    className="w-full mb-3 px-3 py-2 text-xs bg-purple-500 text-white rounded hover:bg-purple-600"
+                  >
+                    ✏️ Draw Custom Boundary
+                  </button>
 
                   <button
                     onClick={saveBoundary}
