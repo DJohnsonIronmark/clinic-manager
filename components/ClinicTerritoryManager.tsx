@@ -76,6 +76,7 @@ export default function ClinicTerritoryManager() {
   const [selectedState, setSelectedState] = useState('');
   const [states, setStates] = useState<string[]>([]);
   const [loadingStatus, setLoadingStatus] = useState('');
+  const [showZipCodes, setShowZipCodes] = useState(false);
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
@@ -381,6 +382,30 @@ export default function ClinicTerritoryManager() {
 
     map.current.on('load', () => {
       setMapLoaded(true);
+
+      // Add zip code boundaries via proxy to avoid CORS issues
+      map.current!.addSource('zip-wms', {
+        type: 'raster',
+        tiles: [
+          `${window.location.origin}/api/tiles/zip?bbox={bbox-epsg-3857}`
+        ],
+        tileSize: 512,
+        attribution: 'U.S. Census Bureau',
+      });
+
+      map.current!.addLayer({
+        id: 'zip-borders',
+        type: 'raster',
+        source: 'zip-wms',
+        minzoom: 6,
+        layout: {
+          visibility: 'none', // Hidden by default
+        },
+        paint: {
+          'raster-opacity': 0.7,
+        },
+      });
+
       setTimeout(() => loadClinics(), 500);
     });
 
@@ -388,6 +413,23 @@ export default function ClinicTerritoryManager() {
       if (map.current) map.current.remove();
     };
   }, [MAPBOX_TOKEN, loadClinics]);
+
+  // Toggle zip code layer visibility
+  useEffect(() => {
+    if (!map.current || !mapLoaded) return;
+
+    try {
+      if (map.current.getLayer('zip-borders')) {
+        map.current.setLayoutProperty(
+          'zip-borders',
+          'visibility',
+          showZipCodes ? 'visible' : 'none'
+        );
+      }
+    } catch (e) {
+      console.error('Error toggling zip layer:', e);
+    }
+  }, [showZipCodes, mapLoaded]);
 
   const flyToClinic = (clinic: Clinic) => {
     if (!map.current || !clinic) return;
@@ -1050,12 +1092,24 @@ export default function ClinicTerritoryManager() {
             />
           </div>
 
-          <button
-            onClick={() => setShowOverlapPanel(true)}
-            className="mt-2 w-full bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600"
-          >
-            Manage Overlaps
-          </button>
+          <div className="flex gap-2 mt-2">
+            <button
+              onClick={() => setShowOverlapPanel(true)}
+              className="flex-1 bg-orange-500 text-white px-3 py-2 rounded-lg hover:bg-orange-600 text-sm"
+            >
+              Manage Overlaps
+            </button>
+            <button
+              onClick={() => setShowZipCodes(!showZipCodes)}
+              className={`flex-1 px-3 py-2 rounded-lg text-sm ${
+                showZipCodes
+                  ? 'bg-indigo-500 text-white'
+                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+              }`}
+            >
+              {showZipCodes ? 'Hide' : 'Show'} Zip Codes
+            </button>
+          </div>
 
           <Link
             href="/chat"
