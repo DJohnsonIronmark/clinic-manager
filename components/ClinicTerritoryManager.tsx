@@ -449,7 +449,7 @@ export default function ClinicTerritoryManager() {
     }
   };
 
-  const startEditing = () => {
+  const startEditing = async () => {
     if (!selectedClinic || !map.current) return;
 
     if (draw.current) {
@@ -467,7 +467,28 @@ export default function ClinicTerritoryManager() {
 
     map.current.addControl(draw.current);
 
-    const geometry = getGeometry(selectedClinic);
+    // Try to get geometry from clinic object first
+    let geometry = getGeometry(selectedClinic);
+
+    // If not available, fetch boundary on-demand
+    if (!geometry) {
+      setSaveStatus('Loading boundary...');
+      try {
+        const boundaryResponse = await fetch(`/api/boundaries?clinic_id=${selectedClinic.clinic_id}`);
+        if (boundaryResponse.ok) {
+          const boundaryData = await boundaryResponse.json();
+          if (boundaryData.boundaries && boundaryData.boundaries.length > 0) {
+            const geojson = boundaryData.boundaries[0].geojson;
+            if (geojson && 'type' in geojson && 'coordinates' in geojson) {
+              geometry = geojson as GeoJSONGeometry;
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Error fetching boundary:', e);
+      }
+      setSaveStatus('');
+    }
 
     if (geometry) {
       const feature = {
@@ -478,9 +499,26 @@ export default function ClinicTerritoryManager() {
       const featureIds = draw.current.add(feature as GeoJSON.Feature);
 
       // Select the feature to enable vertex editing (click and drag)
+      // Use setTimeout to ensure the feature is fully added before selecting
       if (featureIds && featureIds.length > 0) {
-        draw.current.changeMode('direct_select', { featureId: featureIds[0] });
+        setTimeout(() => {
+          if (draw.current) {
+            draw.current.changeMode('direct_select', { featureId: featureIds[0] });
+          }
+        }, 100);
       }
+    } else {
+      // No boundary exists - start in draw mode
+      draw.current.changeMode('draw_polygon');
+      alert('No existing boundary found. Draw a new boundary on the map.');
+    }
+
+    // Hide the boundary layers while editing so draw vertices are visible
+    if (map.current.getLayer('clinic-boundaries-fill')) {
+      map.current.setLayoutProperty('clinic-boundaries-fill', 'visibility', 'none');
+    }
+    if (map.current.getLayer('clinic-boundaries-line')) {
+      map.current.setLayoutProperty('clinic-boundaries-line', 'visibility', 'none');
     }
 
     // Clear previous chat messages when starting new edit session
@@ -622,9 +660,17 @@ User request: ${userMessage}`;
       if (response.ok) {
         setSaveStatus('success');
         setIsEditing(false);
-        if (draw.current) {
-          map.current!.removeControl(draw.current);
+        if (draw.current && map.current) {
+          map.current.removeControl(draw.current);
           draw.current = null;
+
+          // Restore boundary layers visibility
+          if (map.current.getLayer('clinic-boundaries-fill')) {
+            map.current.setLayoutProperty('clinic-boundaries-fill', 'visibility', 'visible');
+          }
+          if (map.current.getLayer('clinic-boundaries-line')) {
+            map.current.setLayoutProperty('clinic-boundaries-line', 'visibility', 'visible');
+          }
         }
         setTimeout(() => {
           loadClinics();
@@ -647,6 +693,14 @@ User request: ${userMessage}`;
     if (draw.current && map.current) {
       map.current.removeControl(draw.current);
       draw.current = null;
+
+      // Restore boundary layers visibility
+      if (map.current.getLayer('clinic-boundaries-fill')) {
+        map.current.setLayoutProperty('clinic-boundaries-fill', 'visibility', 'visible');
+      }
+      if (map.current.getLayer('clinic-boundaries-line')) {
+        map.current.setLayoutProperty('clinic-boundaries-line', 'visibility', 'visible');
+      }
     }
   };
 

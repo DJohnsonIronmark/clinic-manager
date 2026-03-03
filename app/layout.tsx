@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import { AuthProvider } from '@/context/AuthContext';
+import UserMenu from '@/components/UserMenu';
 
 export const metadata: Metadata = {
   title: 'Clinic Territory Manager',
@@ -23,7 +25,14 @@ export default function RootLayout({
           href="https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-draw/v1.4.3/mapbox-gl-draw.css"
         />
       </head>
-      <body>{children}</body>
+      <body>
+        <AuthProvider>
+          <div className="fixed top-2 right-2 z-50">
+            <UserMenu />
+          </div>
+          {children}
+        </AuthProvider>
+      </body>
     </html>
   );
 }
