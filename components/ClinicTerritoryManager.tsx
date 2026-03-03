@@ -460,61 +460,10 @@ export default function ClinicTerritoryManager() {
       displayControlsDefault: false,
       controls: {
         polygon: true,
-        trash: true,
-        point: false,
-        line_string: false,
-        combine_features: false,
-        uncombine_features: false
+        trash: true
       },
-      defaultMode: 'simple_select',
-      styles: [
-        // Polygon fill - active
-        {
-          id: 'gl-draw-polygon-fill-active',
-          type: 'fill',
-          filter: ['all', ['==', 'active', 'true'], ['==', '$type', 'Polygon']],
-          paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.3 }
-        },
-        // Polygon fill - inactive
-        {
-          id: 'gl-draw-polygon-fill-inactive',
-          type: 'fill',
-          filter: ['all', ['==', 'active', 'false'], ['==', '$type', 'Polygon']],
-          paint: { 'fill-color': '#3b82f6', 'fill-opacity': 0.2 }
-        },
-        // Polygon outline
-        {
-          id: 'gl-draw-polygon-stroke-active',
-          type: 'line',
-          filter: ['all', ['==', '$type', 'Polygon']],
-          paint: { 'line-color': '#3b82f6', 'line-width': 3 }
-        },
-        // Vertex points
-        {
-          id: 'gl-draw-polygon-and-line-vertex-active',
-          type: 'circle',
-          filter: ['all', ['==', 'meta', 'vertex'], ['==', '$type', 'Point']],
-          paint: {
-            'circle-radius': 6,
-            'circle-color': '#fff',
-            'circle-stroke-color': '#3b82f6',
-            'circle-stroke-width': 2
-          }
-        },
-        // Midpoints
-        {
-          id: 'gl-draw-polygon-midpoint',
-          type: 'circle',
-          filter: ['all', ['==', 'meta', 'midpoint'], ['==', '$type', 'Point']],
-          paint: {
-            'circle-radius': 4,
-            'circle-color': '#3b82f6',
-            'circle-stroke-color': '#fff',
-            'circle-stroke-width': 1
-          }
-        }
-      ]
-    });
+      defaultMode: 'simple_select'
+    } as MapboxDraw.DrawOptions);
 
     map.current.addControl(draw.current);
 
