@@ -456,7 +456,6 @@ export default function ClinicTerritoryManager() {
       map.current.removeControl(draw.current);
     }
 
-    // @ts-expect-error - MapboxDraw types don't include all valid options
     draw.current = new MapboxDraw({
       displayControlsDefault: false,
       controls: {
