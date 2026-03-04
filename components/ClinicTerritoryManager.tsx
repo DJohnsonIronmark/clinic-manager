@@ -942,51 +942,101 @@ User request: ${userMessage}`;
       const NUM_EXCLUSIONS = 4;
       const MAX_INCLUSIONS = MAX_TOTAL_POINTS - NUM_EXCLUSIONS;
 
-      // Use 1-mile radius with tight grid to better approximate the polygon shape
-      const CIRCLE_RADIUS = 1;
-      const GRID_SPACING = 1.5; // Slight overlap with 1-mile circles
+      // Multi-radius approach: 1mi near edges, 3mi intermediate, 5mi for interior
+      const RADII = [5, 3, 1]; // Process largest first for efficiency
+      const GRID_SPACING_BASE = 1.0; // Base grid spacing in miles
 
       // Convert miles to degrees
       const milesToDegreesLat = (miles: number) => miles / 69;
       const milesToDegreesLng = (miles: number, atLat: number) => miles / (69 * Math.cos(atLat * Math.PI / 180));
 
-      const latStep = milesToDegreesLat(GRID_SPACING);
-      const lngStep = milesToDegreesLng(GRID_SPACING, lat);
+      // Calculate approximate distance from point to polygon boundary
+      // by checking distance to all boundary vertices
+      const getDistanceFromBoundary = (testLat: number, testLng: number): number => {
+        let minDist = Infinity;
+        for (let i = 0; i < coords.length - 1; i++) {
+          // Distance to vertex
+          const vertexDist = calculateDistance(testLat, testLng, coords[i][1], coords[i][0]);
+          if (vertexDist < minDist) minDist = vertexDist;
 
-      // Hexagonal offset for alternating rows
-      const hexOffset = lngStep / 2;
+          // Distance to edge segment (approximate using midpoint)
+          const midLat = (coords[i][1] + coords[i + 1][1]) / 2;
+          const midLng = (coords[i][0] + coords[i + 1][0]) / 2;
+          const midDist = calculateDistance(testLat, testLng, midLat, midLng);
+          if (midDist < minDist) minDist = midDist;
+        }
+        return minDist;
+      };
 
-      const inclusionPoints: Array<{ lat: number; lng: number; distFromCenter: number; distFromBoundary: number }> = [];
+      // Determine appropriate radius based on distance from boundary
+      const getRadiusForPoint = (distFromBoundary: number): number => {
+        // Use larger circles in interior, smaller near edges
+        if (distFromBoundary >= 6) return 5;  // Deep interior: 5mi radius
+        if (distFromBoundary >= 3) return 3;  // Mid-zone: 3mi radius
+        return 1;  // Edge zone: 1mi radius for precision
+      };
 
-      // Always add clinic location first
-      const clinicDistFromBoundary = Math.min(
-        ...coords.map(c => calculateDistance(lat, lng, c[1], c[0]))
-      );
+      // Check if a circle at (lat, lng) with given radius is mostly inside the polygon
+      const isCircleMostlyInside = (centerLat: number, centerLng: number, radiusMiles: number): boolean => {
+        // Check 8 points around the circle perimeter
+        const checkPoints = 8;
+        let insideCount = 0;
+        for (let i = 0; i < checkPoints; i++) {
+          const angle = (i / checkPoints) * 2 * Math.PI;
+          const checkLat = centerLat + milesToDegreesLat(radiusMiles) * Math.sin(angle);
+          const checkLng = centerLng + milesToDegreesLng(radiusMiles, centerLat) * Math.cos(angle);
+          if (isPointInPolygon([checkLng, checkLat], coords as [number, number][])) {
+            insideCount++;
+          }
+        }
+        return insideCount >= checkPoints * 0.6; // At least 60% inside
+      };
+
+      interface InclusionPoint {
+        lat: number;
+        lng: number;
+        radius: number;
+        distFromCenter: number;
+        distFromBoundary: number;
+      }
+
+      const inclusionPoints: InclusionPoint[] = [];
+
+      // Always add clinic location first with appropriate radius
+      const clinicDistFromBoundary = getDistanceFromBoundary(lat, lng);
+      const clinicRadius = Math.min(getRadiusForPoint(clinicDistFromBoundary), 5);
       inclusionPoints.push({
         lat: lat,
         lng: lng,
+        radius: clinicRadius,
         distFromCenter: 0,
         distFromBoundary: clinicDistFromBoundary
       });
 
-      // Generate hexagonal grid covering the bounding box
+      // Generate candidate points on a grid covering the polygon
+      const fineGridSpacing = GRID_SPACING_BASE;
+      const latStep = milesToDegreesLat(fineGridSpacing);
+      const lngStep = milesToDegreesLng(fineGridSpacing, lat);
+      const hexOffset = lngStep / 2;
+
+      const candidatePoints: InclusionPoint[] = [];
+
       let rowIndex = 0;
       for (let testLat = minLat; testLat <= maxLat; testLat += latStep) {
         const rowOffset = (rowIndex % 2 === 1) ? hexOffset : 0;
 
         for (let testLng = minLng + rowOffset; testLng <= maxLng; testLng += lngStep) {
-          // Skip if too close to clinic location (already added)
           const distFromClinic = calculateDistance(lat, lng, testLat, testLng);
-          if (distFromClinic < GRID_SPACING * 0.5) continue;
+          if (distFromClinic < fineGridSpacing * 0.3) continue; // Skip very near clinic
 
-          // Check if point is inside the polygon
           if (isPointInPolygon([testLng, testLat], coords as [number, number][])) {
-            const distFromBoundary = Math.min(
-              ...coords.map(c => calculateDistance(testLat, testLng, c[1], c[0]))
-            );
-            inclusionPoints.push({
+            const distFromBoundary = getDistanceFromBoundary(testLat, testLng);
+            const radius = getRadiusForPoint(distFromBoundary);
+
+            candidatePoints.push({
               lat: testLat,
               lng: testLng,
+              radius,
               distFromCenter: distFromClinic,
               distFromBoundary
             });
@@ -995,16 +1045,83 @@ User request: ${userMessage}`;
         rowIndex++;
       }
 
-      // Sort by distance from boundary (closest to edge first for better polygon approximation)
-      // This prioritizes points that help define the polygon's outer shape
-      const clinicPoint = inclusionPoints[0];
-      const gridPoints = inclusionPoints.slice(1).sort((a, b) => a.distFromBoundary - b.distFromBoundary);
-      const limitedGridPoints = gridPoints.slice(0, MAX_INCLUSIONS - 1);
+      // Simple approach: distribute points spatially
+      // 1. Sort by distance from clinic (spread outward from center)
+      // 2. Select points that are well-spaced from already-selected points
+      candidatePoints.sort((a, b) => a.distFromCenter - b.distFromCenter);
 
-      const distributedInclusions = [clinicPoint, ...limitedGridPoints];
+      const selectedPoints: InclusionPoint[] = [];
+      const minSpacing = 1.2; // Minimum miles between circle centers
 
-      // For exclusion calculation
-      const actualMaxInclusionRadius = CIRCLE_RADIUS;
+      const isTooClose = (testLat: number, testLng: number): boolean => {
+        for (const selected of selectedPoints) {
+          const dist = calculateDistance(testLat, testLng, selected.lat, selected.lng);
+          // Allow circles to overlap somewhat - just avoid putting centers too close
+          if (dist < minSpacing) return true;
+        }
+        // Check against clinic location - use smaller spacing near clinic
+        const distFromClinic = calculateDistance(testLat, testLng, lat, lng);
+        if (distFromClinic < minSpacing) return true;
+        return false;
+      };
+
+      // Select spatially distributed points
+      for (const candidate of candidatePoints) {
+        if (selectedPoints.length >= MAX_INCLUSIONS - 1) break; // -1 for clinic
+
+        if (isTooClose(candidate.lat, candidate.lng)) continue;
+
+        // For larger circles, verify they fit reasonably inside the polygon
+        let finalRadius = candidate.radius;
+        if (finalRadius >= 3) {
+          if (!isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
+            finalRadius = finalRadius === 5 ? 3 : 1;
+            if (finalRadius >= 3 && !isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
+              finalRadius = 1;
+            }
+          }
+        }
+        candidate.radius = finalRadius;
+
+        selectedPoints.push(candidate);
+      }
+
+      // Now prioritize edge points - add any near-boundary points we missed
+      const edgeCandidates = candidatePoints
+        .filter(p => p.distFromBoundary < 2.5)
+        .filter(p => !selectedPoints.some(s =>
+          calculateDistance(p.lat, p.lng, s.lat, s.lng) < 1.0
+        ))
+        .sort((a, b) => a.distFromBoundary - b.distFromBoundary);
+
+      for (const edge of edgeCandidates) {
+        if (selectedPoints.length >= MAX_INCLUSIONS - 1) break;
+        edge.radius = 1; // Force 1mi for edge points
+        selectedPoints.push(edge);
+      }
+
+      // Combine clinic + selected points
+      const distributedInclusions: InclusionPoint[] = [
+        inclusionPoints[0], // Clinic location
+        ...selectedPoints
+      ];
+
+      // Debug logging
+      console.log('FB Targeting Debug:', {
+        territorySize: `${territoryWidth.toFixed(1)} x ${territoryHeight.toFixed(1)} miles`,
+        totalCandidates: candidatePoints.length,
+        selectedPoints: selectedPoints.length,
+        edgeCandidatesCount: edgeCandidates.length,
+        finalInclusions: distributedInclusions.length,
+        clinicRadius,
+        radiusBreakdown: distributedInclusions.reduce((acc, p) => {
+          acc[p.radius] = (acc[p.radius] || 0) + 1;
+          return acc;
+        }, {} as Record<number, number>)
+      });
+
+      // For exclusion calculation - use max inclusion radius (5mi)
+      const actualMaxInclusionRadius = 5;
       const minExclusionDistance = actualMaxInclusionRadius + neutralBuffer + 10;
 
       setSaveStatus('generating boundary exclusion points...');
@@ -1120,7 +1237,7 @@ User request: ${userMessage}`;
         } else {
           // Grid points - geocode to get real address
           address = await getAddress(point.lat, point.lng) || `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
-          pointName = `Include ${i}`;
+          pointName = `Include ${i} (${point.radius}mi)`;
         }
 
         innerLayer.push({
@@ -1128,7 +1245,7 @@ User request: ${userMessage}`;
           address: address,
           latitude: point.lat,
           longitude: point.lng,
-          radius: CIRCLE_RADIUS,
+          radius: point.radius,
           distance_unit: 'mile',
           layer_type: 'include'
         });
@@ -1172,8 +1289,19 @@ User request: ${userMessage}`;
       lines.push(`Metro Type: ${selectedClinic.metro_type}`);
       lines.push(`Generated: ${new Date().toLocaleString()}`);
       lines.push('');
+      // Count inclusions by radius
+      const radiusCounts = sortedInclusions.reduce((acc, loc) => {
+        acc[loc.radius] = (acc[loc.radius] || 0) + 1;
+        return acc;
+      }, {} as Record<number, number>);
+      const radiusSummary = Object.entries(radiusCounts)
+        .sort(([a], [b]) => Number(a) - Number(b))
+        .map(([r, c]) => `${c}x${r}mi`)
+        .join(', ');
+
       lines.push(`COVERAGE SUMMARY`);
-      lines.push(`  Include Radius: ${CIRCLE_RADIUS} mi`);
+      lines.push(`  Include Radii: 1mi (edges), 3mi (mid), 5mi (interior)`);
+      lines.push(`  Include Breakdown: ${radiusSummary}`);
       lines.push(`  Exclude Radii: 45 mi (corners) / 30 mi (cardinals)`);
       lines.push(`  Include Points: ${sortedInclusions.length}`);
       lines.push(`  Exclude Points: ${sortedExclusions.length}`);
@@ -1327,7 +1455,7 @@ User request: ${userMessage}`;
       while (batchCount < 50) {
         batchCount++;
 
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/resolve_territory_overlaps_batch`, {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_by_distance_batch`, {
           method: 'POST',
           headers: {
             'apikey': SUPABASE_KEY,
@@ -1335,19 +1463,24 @@ User request: ${userMessage}`;
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            target_state: state || null,
-            batch_size: batchSize
+            p_state: state || null,
+            p_batch_size: batchSize
           })
         });
 
         if (response.ok) {
           const results = await response.json();
-          const resolved = Array.isArray(results) ? results.length : 0;
+          // Count only successfully updated clinics (where second element is true)
+          const resolved = Array.isArray(results)
+            ? results.filter((r: [string, boolean, string]) => r[1] === true).length
+            : 0;
+          const totalProcessed = Array.isArray(results) ? results.length : 0;
           totalResolved += resolved;
 
-          setSaveStatus(`resolving (${totalResolved} done)`);
+          setSaveStatus(`resolving (${totalResolved} updated)`);
 
-          if (resolved === 0 || resolved < batchSize) {
+          // Stop if no clinics were processed or batch is incomplete
+          if (totalProcessed === 0 || totalProcessed < batchSize) {
             break;
           }
 
@@ -1672,7 +1805,8 @@ User request: ${userMessage}`;
                   • Address will be geocoded to coordinates<br/>
                   • Drive-time isochrones (10/15/20/30 min) will be generated<br/>
                   • Metro type will be auto-detected<br/>
-                  • Boundary will be set based on metro type
+                  • Boundary will be set based on metro type<br/>
+                  • <strong>Overlaps with nearby clinics will be resolved</strong>
                 </p>
               </div>
 

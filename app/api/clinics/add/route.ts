@@ -241,9 +241,59 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 8: Resolve overlaps if requested
-    if (resolve_overlaps) {
-      // This would trigger the overlap resolution logic
-      // For now, we'll return a flag indicating overlaps should be checked
+    let overlapsResolved = 0;
+    if (resolve_overlaps && state) {
+      try {
+        // Run overlap resolution for the state where the new clinic was added
+        let batchCount = 0;
+        const maxBatches = 20;
+        const batchSize = 5;
+
+        while (batchCount < maxBatches) {
+          batchCount++;
+
+          const overlapResponse = await fetch(
+            `${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_by_distance_batch`,
+            {
+              method: 'POST',
+              headers: {
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
+                p_state: state,
+                p_batch_size: batchSize
+              })
+            }
+          );
+
+          if (overlapResponse.ok) {
+            const results = await overlapResponse.json();
+            // Count only successfully updated clinics
+            const resolved = Array.isArray(results)
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              ? results.filter((r: any) => r[1] === true).length
+              : 0;
+            const totalProcessed = Array.isArray(results) ? results.length : 0;
+            overlapsResolved += resolved;
+
+            // Stop if no clinics were processed or batch is incomplete
+            if (totalProcessed === 0 || totalProcessed < batchSize) {
+              break;
+            }
+
+            // Small delay between batches
+            await new Promise(r => setTimeout(r, 200));
+          } else {
+            console.error('Overlap resolution batch failed:', await overlapResponse.text());
+            break;
+          }
+        }
+      } catch (overlapError) {
+        console.error('Overlap resolution error:', overlapError);
+        // Continue - clinic was created, overlap resolution is secondary
+      }
     }
 
     return NextResponse.json({
@@ -258,7 +308,8 @@ export async function POST(request: NextRequest) {
         longitude: lng,
         address: geocodeResult.place_name
       },
-      message: `Clinic "${clinic_name}" created successfully with ${metro_type} drive-time boundaries.`
+      overlaps_resolved: overlapsResolved,
+      message: `Clinic "${clinic_name}" created successfully with ${metro_type} drive-time boundaries.${overlapsResolved > 0 ? ` Resolved ${overlapsResolved} territory overlaps.` : ''}`
     });
 
   } catch (error) {
