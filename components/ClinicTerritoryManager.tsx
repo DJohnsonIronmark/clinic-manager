@@ -908,9 +908,37 @@ User request: ${userMessage}`;
         return;
       }
 
-      const coords = geometry.type === 'Polygon'
-        ? (geometry.coordinates as number[][][])[0]
-        : (geometry.coordinates as number[][][][])[0][0];
+      // Debug: log the geometry structure
+      console.log('Geometry Debug:', {
+        type: geometry.type,
+        coordinatesLength: geometry.coordinates?.length,
+        firstCoordSample: JSON.stringify(geometry.coordinates?.[0]?.slice?.(0, 2) || geometry.coordinates?.[0])
+      });
+
+      // Handle different geometry types
+      let coords: number[][];
+      if (geometry.type === 'Polygon') {
+        coords = (geometry.coordinates as number[][][])[0];
+      } else if (geometry.type === 'MultiPolygon') {
+        // For MultiPolygon, find the largest polygon by coordinate count
+        const polygons = geometry.coordinates as number[][][][];
+        let largestPolygon = polygons[0][0];
+        for (const polygon of polygons) {
+          if (polygon[0].length > largestPolygon.length) {
+            largestPolygon = polygon[0];
+          }
+        }
+        coords = largestPolygon;
+      } else {
+        console.error('Unexpected geometry type:', geometry.type);
+        coords = (geometry.coordinates as number[][][])[0] || [];
+      }
+
+      console.log('Coords Debug:', {
+        coordsLength: coords?.length,
+        firstCoord: coords?.[0],
+        lastCoord: coords?.[coords?.length - 1]
+      });
 
       const lats = coords.map(c => c[1]);
       const lngs = coords.map(c => c[0]);
@@ -918,6 +946,8 @@ User request: ${userMessage}`;
       const maxLat = Math.max(...lats);
       const minLng = Math.min(...lngs);
       const maxLng = Math.max(...lngs);
+
+      console.log('Bounds Debug:', { minLat, maxLat, minLng, maxLng });
 
       const territoryWidth = calculateDistance(lat, minLng, lat, maxLng);
       const territoryHeight = calculateDistance(minLat, lng, maxLat, lng);
