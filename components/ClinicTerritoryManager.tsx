@@ -912,7 +912,7 @@ User request: ${userMessage}`;
       console.log('Geometry Debug:', {
         type: geometry.type,
         coordinatesLength: geometry.coordinates?.length,
-        firstCoordSample: JSON.stringify(geometry.coordinates?.[0]?.slice?.(0, 2) || geometry.coordinates?.[0])
+        firstCoordSample: JSON.stringify(Array.isArray(geometry.coordinates?.[0]) ? (geometry.coordinates[0] as unknown[]).slice(0, 2) : geometry.coordinates?.[0])
       });
 
       // Handle different geometry types
