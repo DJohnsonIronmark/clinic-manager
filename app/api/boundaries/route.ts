@@ -1,46 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_KEY!;
+import { createClient } from '@/lib/supabase/server';
 
 export async function GET(request: NextRequest) {
   try {
+    const supabase = await createClient();
     const searchParams = request.nextUrl.searchParams;
     const offset = parseInt(searchParams.get('offset') || '0');
     const limit = parseInt(searchParams.get('limit') || '50');
     const clinicId = searchParams.get('clinic_id');
 
-    let url: string;
+    let query = supabase
+      .from('clinic_territories')
+      .select('clinic_id,clinic_name,metro_type,geojson', { count: 'exact' });
+
     if (clinicId) {
-      // Load single clinic boundary - use geojson (corrected boundaries from geom column)
-      url = `${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,metro_type,geojson&clinic_id=eq.${clinicId}`;
+      query = query.eq('clinic_id', clinicId);
     } else {
-      // Load batch of boundaries - use geojson (corrected boundaries from geom column)
-      url = `${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,metro_type,geojson&offset=${offset}&limit=${limit}`;
+      query = query.range(offset, offset + limit - 1);
     }
 
-    const response = await fetch(url, {
-      headers: {
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'count=exact'
-      },
-      cache: 'no-store'
-    });
+    const { data: boundaries, error, count } = await query;
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Boundaries API error:', response.status, errorText);
-      return NextResponse.json({ error: 'Failed to fetch boundaries', details: errorText }, { status: response.status });
+    if (error) {
+      console.error('Boundaries API error:', error);
+      return NextResponse.json({ error: 'Failed to fetch boundaries', details: error.message }, { status: 500 });
     }
 
-    const contentRange = response.headers.get('content-range');
-    const total = contentRange ? parseInt(contentRange.split('/')[1]) : 0;
-
-    const boundaries = await response.json();
+    const total = count || 0;
 
     return NextResponse.json({
-      boundaries,
+      boundaries: boundaries || [],
       total,
       offset,
       limit,

@@ -1,39 +1,29 @@
 import { NextResponse } from 'next/server';
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_KEY!;
+import { createClient } from '@/lib/supabase/server';
 
 export async function GET() {
   try {
-    // Helper to fetch all rows with pagination (Supabase caps at 1000 per request)
-    const fetchAllRows = async (url: string): Promise<Record<string, unknown>[]> => {
-      const rows: Record<string, unknown>[] = [];
-      let offset = 0;
-      const batchSize = 1000;
-      while (true) {
-        const separator = url.includes('?') ? '&' : '?';
-        const res = await fetch(`${url}${separator}offset=${offset}&limit=${batchSize}`, {
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-          },
-          cache: 'no-store'
-        });
-        if (!res.ok) {
-          throw new Error(`Supabase error ${res.status}: ${await res.text()}`);
-        }
-        const batch = await res.json();
-        rows.push(...batch);
-        if (batch.length < batchSize) break;
-        offset += batchSize;
-      }
-      return rows;
+    const supabase = await createClient();
+
+    // Fetch both tables in parallel using SDK (handles pagination automatically)
+    const [territoriesResult, locationsResult] = await Promise.all([
+      supabase
+        .from('clinic_territories')
+        .select('clinic_id,clinic_name,state,city,metro_type'),
+      supabase
+        .from('TJC Locations GeoCoded')
+        .select('*'),
+    ]);
+
+    if (territoriesResult.error) {
+      throw new Error(`Territories error: ${territoriesResult.error.message}`);
+    }
+    if (locationsResult.error) {
+      throw new Error(`Locations error: ${locationsResult.error.message}`);
     }
 
-    const [territories, locations] = await Promise.all([
-      fetchAllRows(`${SUPABASE_URL}/rest/v1/clinic_territories?select=clinic_id,clinic_name,state,city,metro_type`),
-      fetchAllRows(`${SUPABASE_URL}/rest/v1/${encodeURIComponent('TJC Locations GeoCoded')}?select=*`)
-    ]);
+    const territories = territoriesResult.data || [];
+    const locations = locationsResult.data || [];
 
     // Merge the data
     const locById: Record<string, Record<string, unknown>> = {};
