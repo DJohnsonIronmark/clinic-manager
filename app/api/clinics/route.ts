@@ -8,8 +8,10 @@ const supabase = createClient(
 );
 
 // Fetch all rows by paginating in chunks to bypass 1000 row limit
-async function fetchAllRows(table: string, columns: string) {
-  const allRows: Record<string, unknown>[] = [];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function fetchAllRows(table: string, columns: string): Promise<any[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const allRows: any[] = [];
   let offset = 0;
   const pageSize = 1000;
 
