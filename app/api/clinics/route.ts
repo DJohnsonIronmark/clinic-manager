@@ -39,6 +39,14 @@ export async function GET() {
       if (id) locById[id] = loc;
     });
 
+    // Debug: log a sample of locations data
+    const sampleLoc = locations.find((l: Record<string, unknown>) =>
+      String(l.ClinicID) === '13001' || l.Name === 'Warwick'
+    );
+    console.log('Warwick in locations:', sampleLoc);
+    console.log('locById keys sample:', Object.keys(locById).slice(0, 5));
+    console.log('locById[13001]:', locById['13001']);
+
     const merged = territories.map((t: Record<string, unknown>) => {
       const id = String(t.clinic_id || t.ClinicID || '');
       const loc = id ? locById[id] : null;
@@ -48,8 +56,8 @@ export async function GET() {
         state: (t.state || loc?.State) as string,
         city: (t.city || loc?.City || loc?.city) as string,
         address: (loc?.Address || loc?.address || t.address) as string,
-        latitude: parseFloat(String(loc?.Latitude ?? loc?.latitude ?? 0)),
-        longitude: parseFloat(String(loc?.Longitude ?? loc?.longitude ?? 0)),
+        latitude: parseFloat(String(loc?.latitude ?? 0)),
+        longitude: parseFloat(String(loc?.longitude ?? 0)),
         metro_type: (t.metro_type || 'unknown') as string
       };
     });
