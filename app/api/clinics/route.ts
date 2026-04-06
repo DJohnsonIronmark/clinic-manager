@@ -1,9 +1,14 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createClient } from '@supabase/supabase-js';
+
+// Use anon client for public data - no cookies needed
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY!
+);
 
 export async function GET() {
   try {
-    const supabase = await createClient();
 
     // Fetch both tables in parallel using SDK (handles pagination automatically)
     const [territoriesResult, locationsResult] = await Promise.all([
