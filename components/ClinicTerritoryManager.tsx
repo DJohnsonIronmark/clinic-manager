@@ -10,6 +10,8 @@ import Link from 'next/link';
 import { generateColor, calculateDistance, isPointInPolygon, estimateDriveTime, selectRadii, parseJSON } from '@/lib/geo-utils';
 import type { Clinic, OverlapAnalysis, GeoJSONFeature, GeoJSONFeatureCollection, GeoJSONGeometry, AgeTargetingData } from '@/lib/types';
 import ageTargetingData from '@/data/age-targeting.json';
+import AIInsightsPanel from './AIInsightsPanel';
+import ChurnRiskPanel from './ChurnRiskPanel';
 
 // Icons
 const SearchIcon = () => (
@@ -81,6 +83,7 @@ export default function ClinicTerritoryManager() {
   const [editChatMessages, setEditChatMessages] = useState<Array<{role: 'user' | 'assistant', content: string}>>([]);
   const [editChatLoading, setEditChatLoading] = useState(false);
   const [showAddLocation, setShowAddLocation] = useState(false);
+  const [showChurnRisk, setShowChurnRisk] = useState(false);
   const [newLocationForm, setNewLocationForm] = useState({ clinic_name: '', clinic_id: '', address: '' });
   const [addingLocation, setAddingLocation] = useState(false);
 
@@ -998,12 +1001,17 @@ User request: ${userMessage}`;
         return minDist;
       };
 
-      // Determine appropriate radius based on distance from boundary
-      const getRadiusForPoint = (distFromBoundary: number): number => {
-        // Use larger circles in interior, smaller near edges
-        if (distFromBoundary >= 6) return 5;  // Deep interior: 5mi radius
-        if (distFromBoundary >= 3) return 3;  // Mid-zone: 3mi radius
-        return 1;  // Edge zone: 1mi radius for precision
+      // Determine appropriate radius based on distance from clinic center
+      // Using center distance works better than boundary distance for complex isochrone shapes
+      const getRadiusForPoint = (distFromCenter: number, maxDist: number): number => {
+        // Calculate what percentage of the territory radius this point is at
+        const pctFromCenter = distFromCenter / maxDist;
+        // Core zone (0-40% from center): 5mi radius
+        if (pctFromCenter <= 0.4) return 5;
+        // Mid zone (40-70% from center): 3mi radius
+        if (pctFromCenter <= 0.7) return 3;
+        // Edge zone (70%+ from center): 1mi radius for precision
+        return 1;
       };
 
       // Check if a circle at (lat, lng) with given radius is mostly inside the polygon
@@ -1032,13 +1040,21 @@ User request: ${userMessage}`;
 
       const inclusionPoints: InclusionPoint[] = [];
 
-      // Always add clinic location first with appropriate radius
+      // Calculate max distance from clinic to any boundary point for radius scaling
+      let maxDistFromClinic = 0;
+      for (const coord of coords) {
+        const dist = calculateDistance(lat, lng, coord[1], coord[0]);
+        if (dist > maxDistFromClinic) maxDistFromClinic = dist;
+      }
+      // Ensure minimum to avoid division issues
+      maxDistFromClinic = Math.max(maxDistFromClinic, 5);
+
+      // Always add clinic location first with 5mi radius (center of territory)
       const clinicDistFromBoundary = getDistanceFromBoundary(lat, lng);
-      const clinicRadius = Math.min(getRadiusForPoint(clinicDistFromBoundary), 5);
       inclusionPoints.push({
         lat: lat,
         lng: lng,
-        radius: clinicRadius,
+        radius: 5, // Clinic is always at center, use max radius
         distFromCenter: 0,
         distFromBoundary: clinicDistFromBoundary
       });
@@ -1061,7 +1077,8 @@ User request: ${userMessage}`;
 
           if (isPointInPolygon([testLng, testLat], coords as [number, number][])) {
             const distFromBoundary = getDistanceFromBoundary(testLat, testLng);
-            const radius = getRadiusForPoint(distFromBoundary);
+            // Use distance from clinic center for radius (works better with complex isochrones)
+            const radius = getRadiusForPoint(distFromClinic, maxDistFromClinic);
 
             candidatePoints.push({
               lat: testLat,
@@ -1139,11 +1156,11 @@ User request: ${userMessage}`;
       // Debug logging
       console.log('FB Targeting Debug:', {
         territorySize: `${territoryWidth.toFixed(1)} x ${territoryHeight.toFixed(1)} miles`,
+        maxDistFromClinic: `${maxDistFromClinic.toFixed(1)} miles`,
         totalCandidates: candidatePoints.length,
         selectedPoints: selectedPoints.length,
         edgeCandidatesCount: edgeCandidates.length,
         finalInclusions: distributedInclusions.length,
-        clinicRadius,
         radiusBreakdown: distributedInclusions.reduce((acc, p) => {
           acc[p.radius] = (acc[p.radius] || 0) + 1;
           return acc;
@@ -1562,6 +1579,15 @@ User request: ${userMessage}`;
               Manage Overlaps
             </button>
             <button
+              onClick={() => setShowChurnRisk(true)}
+              className="flex-1 bg-red-500 text-white px-3 py-2 rounded-lg hover:bg-red-600 text-sm"
+            >
+              Churn Risk
+            </button>
+          </div>
+
+          <div className="flex gap-2 mt-2">
+            <button
               onClick={() => setShowZipCodes(!showZipCodes)}
               className={`flex-1 px-3 py-2 rounded-lg text-sm ${
                 showZipCodes
@@ -1586,6 +1612,11 @@ User request: ${userMessage}`;
           >
             + Add New Location
           </button>
+
+          <AIInsightsPanel
+            supabaseUrl={SUPABASE_URL}
+            supabaseKey={SUPABASE_KEY}
+          />
         </div>
 
         <div className="p-4">
@@ -1925,6 +1956,13 @@ User request: ${userMessage}`;
               )}
             </div>
           </div>
+        )}
+
+        {showChurnRisk && (
+          <ChurnRiskPanel
+            onClose={() => setShowChurnRisk(false)}
+            selectedClinicName={selectedClinic?.clinic_name}
+          />
         )}
       </div>
     </div>
