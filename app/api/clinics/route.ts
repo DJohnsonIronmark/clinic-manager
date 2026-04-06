@@ -10,16 +10,16 @@ const supabase = createClient(
 export async function GET() {
   try {
 
-    // Fetch both tables in parallel - set high limit to get all rows
+    // Fetch both tables - use range(0, 1999) to bypass 1000 row default limit
     const [territoriesResult, locationsResult] = await Promise.all([
       supabase
         .from('clinic_territories')
         .select('clinic_id,clinic_name,state,city,metro_type')
-        .limit(2000),
+        .range(0, 1999),
       supabase
         .from('TJC Locations GeoCoded')
         .select('ClinicID,Name,Address,City,State,latitude,longitude')
-        .limit(2000),
+        .range(0, 1999),
     ]);
 
     if (territoriesResult.error) {
