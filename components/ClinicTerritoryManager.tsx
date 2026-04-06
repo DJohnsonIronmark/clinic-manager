@@ -975,9 +975,10 @@ User request: ${userMessage}`;
       const NUM_EXCLUSIONS = 4;
       const MAX_INCLUSIONS = MAX_TOTAL_POINTS - NUM_EXCLUSIONS;
 
-      // Multi-radius approach: 1mi near edges, 3mi intermediate, 5mi for interior
-      const RADII = [5, 3, 1]; // Process largest first for efficiency
-      const GRID_SPACING_BASE = 1.0; // Base grid spacing in miles
+      // Grid spacing based on metro type
+      // Suburban/Rural use 5mi circles, so wider spacing; Urban uses smaller circles
+      const metroLower = metroType.toLowerCase();
+      const GRID_SPACING_BASE = (metroLower === 'suburban' || metroLower === 'rural') ? 3.0 : 1.0;
 
       // Convert miles to degrees
       const milesToDegreesLat = (miles: number) => miles / 69;
@@ -1001,17 +1002,20 @@ User request: ${userMessage}`;
         return minDist;
       };
 
-      // Determine appropriate radius based on distance from clinic center
-      // Using center distance works better than boundary distance for complex isochrone shapes
+      // Determine appropriate radius based on metro type and distance from center
       const getRadiusForPoint = (distFromCenter: number, maxDist: number): number => {
-        // Calculate what percentage of the territory radius this point is at
+        const metroLower = metroType.toLowerCase();
+
+        // Suburban and Rural: use 5mi radius for all points (better coverage)
+        if (metroLower === 'suburban' || metroLower === 'rural') {
+          return 5;
+        }
+
+        // Urban: use smaller radii based on distance from center
         const pctFromCenter = distFromCenter / maxDist;
-        // Core zone (0-40% from center): 5mi radius
-        if (pctFromCenter <= 0.4) return 5;
-        // Mid zone (40-70% from center): 3mi radius
-        if (pctFromCenter <= 0.7) return 3;
-        // Edge zone (70%+ from center): 1mi radius for precision
-        return 1;
+        if (pctFromCenter <= 0.4) return 3;  // Core zone: 3mi
+        if (pctFromCenter <= 0.7) return 2;  // Mid zone: 2mi
+        return 1;  // Edge zone: 1mi for precision
       };
 
       // Check if a circle at (lat, lng) with given radius is mostly inside the polygon
@@ -1098,7 +1102,8 @@ User request: ${userMessage}`;
       candidatePoints.sort((a, b) => a.distFromCenter - b.distFromCenter);
 
       const selectedPoints: InclusionPoint[] = [];
-      const minSpacing = 1.2; // Minimum miles between circle centers
+      // Minimum spacing between circle centers - wider for suburban/rural with 5mi circles
+      const minSpacing = (metroLower === 'suburban' || metroLower === 'rural') ? 4.0 : 1.2;
 
       const isTooClose = (testLat: number, testLng: number): boolean => {
         for (const selected of selectedPoints) {
@@ -1354,7 +1359,7 @@ User request: ${userMessage}`;
         .join(', ');
 
       lines.push(`COVERAGE SUMMARY`);
-      lines.push(`  Include Radii: 1mi (edges), 3mi (mid), 5mi (interior)`);
+      lines.push(`  Include Radii: ${metroLower === 'suburban' || metroLower === 'rural' ? '5mi (all points)' : '1mi (edges), 2mi (mid), 3mi (interior)'}`);
       lines.push(`  Include Breakdown: ${radiusSummary}`);
       lines.push(`  Exclude Radii: 45 mi (corners) / 30 mi (cardinals)`);
       lines.push(`  Include Points: ${sortedInclusions.length}`);
