@@ -7,56 +7,55 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY!
 );
 
+// Fetch all rows by paginating in chunks to bypass 1000 row limit
+async function fetchAllRows(table: string, columns: string) {
+  const allRows: Record<string, unknown>[] = [];
+  let offset = 0;
+  const pageSize = 1000;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(columns)
+      .range(offset, offset + pageSize - 1);
+
+    if (error) throw new Error(`${table} error: ${error.message}`);
+    if (!data || data.length === 0) break;
+
+    allRows.push(...data);
+    if (data.length < pageSize) break; // Last page
+    offset += pageSize;
+  }
+
+  return allRows;
+}
+
 export async function GET() {
   try {
-
-    // Fetch both tables - use range(0, 1999) to bypass 1000 row default limit
-    const [territoriesResult, locationsResult] = await Promise.all([
-      supabase
-        .from('clinic_territories')
-        .select('clinic_id,clinic_name,state,city,metro_type')
-        .range(0, 1999),
-      supabase
-        .from('TJC Locations GeoCoded')
-        .select('ClinicID,Name,Address,City,State,latitude,longitude')
-        .range(0, 1999),
+    // Fetch both tables with pagination to get ALL rows
+    const [territories, locations] = await Promise.all([
+      fetchAllRows('clinic_territories', 'clinic_id,clinic_name,state,city,metro_type'),
+      fetchAllRows('TJC Locations GeoCoded', 'ClinicID,Name,Address,City,State,latitude,longitude'),
     ]);
 
-    if (territoriesResult.error) {
-      throw new Error(`Territories error: ${territoriesResult.error.message}`);
-    }
-    if (locationsResult.error) {
-      throw new Error(`Locations error: ${locationsResult.error.message}`);
-    }
-
-    const territories = territoriesResult.data || [];
-    const locations = locationsResult.data || [];
+    console.log('Fetched:', territories.length, 'territories,', locations.length, 'locations');
 
     // Merge the data - convert IDs to strings for consistent lookup
     const locById: Record<string, Record<string, unknown>> = {};
-    locations.forEach((loc: Record<string, unknown>) => {
-      const id = String(loc.ClinicID || loc.clinic_id || '');
+    locations.forEach((loc) => {
+      const id = String(loc.ClinicID || '');
       if (id) locById[id] = loc;
     });
 
-    // Debug: check data counts and Warwick specifically
-    console.log('Locations count:', locations.length);
-    console.log('Territories count:', territories.length);
-    const warwickLoc = locations.find((l: Record<string, unknown>) =>
-      String(l.ClinicID) === '13001' || l.Name === 'Warwick'
-    );
-    console.log('Warwick location:', warwickLoc);
-    console.log('locById has 13001:', '13001' in locById, locById['13001']);
-
-    const merged = territories.map((t: Record<string, unknown>) => {
-      const id = String(t.clinic_id || t.ClinicID || '');
+    const merged = territories.map((t) => {
+      const id = String(t.clinic_id || '');
       const loc = id ? locById[id] : null;
       return {
         clinic_id: id,
         clinic_name: (t.clinic_name || loc?.Name || `Clinic ${id}`) as string,
         state: (t.state || loc?.State) as string,
-        city: (t.city || loc?.City || loc?.city) as string,
-        address: (loc?.Address || loc?.address || t.address) as string,
+        city: (t.city || loc?.City) as string,
+        address: (loc?.Address || '') as string,
         latitude: parseFloat(String(loc?.latitude ?? 0)),
         longitude: parseFloat(String(loc?.longitude ?? 0)),
         metro_type: (t.metro_type || 'unknown') as string
