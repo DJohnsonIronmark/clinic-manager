@@ -25,15 +25,15 @@ export async function GET() {
     const territories = territoriesResult.data || [];
     const locations = locationsResult.data || [];
 
-    // Merge the data
+    // Merge the data - convert IDs to strings for consistent lookup
     const locById: Record<string, Record<string, unknown>> = {};
     locations.forEach((loc: Record<string, unknown>) => {
-      const id = (loc.ClinicID || loc.clinic_id) as string;
+      const id = String(loc.ClinicID || loc.clinic_id || '');
       if (id) locById[id] = loc;
     });
 
     const merged = territories.map((t: Record<string, unknown>) => {
-      const id = (t.clinic_id || t.ClinicID) as string;
+      const id = String(t.clinic_id || t.ClinicID || '');
       const loc = id ? locById[id] : null;
       return {
         clinic_id: id,
