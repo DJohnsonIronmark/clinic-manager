@@ -39,13 +39,14 @@ export async function GET() {
       if (id) locById[id] = loc;
     });
 
-    // Debug: log a sample of locations data
-    const sampleLoc = locations.find((l: Record<string, unknown>) =>
+    // Debug: check data counts and Warwick specifically
+    console.log('Locations count:', locations.length);
+    console.log('Territories count:', territories.length);
+    const warwickLoc = locations.find((l: Record<string, unknown>) =>
       String(l.ClinicID) === '13001' || l.Name === 'Warwick'
     );
-    console.log('Warwick in locations:', sampleLoc);
-    console.log('locById keys sample:', Object.keys(locById).slice(0, 5));
-    console.log('locById[13001]:', locById['13001']);
+    console.log('Warwick location:', warwickLoc);
+    console.log('locById has 13001:', '13001' in locById, locById['13001']);
 
     const merged = territories.map((t: Record<string, unknown>) => {
       const id = String(t.clinic_id || t.ClinicID || '');
