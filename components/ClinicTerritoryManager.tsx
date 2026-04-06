@@ -1118,13 +1118,20 @@ User request: ${userMessage}`;
 
         if (isTooClose(candidate.lat, candidate.lng)) continue;
 
-        // For larger circles, verify they fit reasonably inside the polygon
+        // For larger circles, verify they fit inside the polygon
+        // But be more lenient for points near the clinic center (core zone)
         let finalRadius = candidate.radius;
+        const pctFromCenter = candidate.distFromCenter / maxDistFromClinic;
+
         if (finalRadius >= 3) {
-          if (!isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
-            finalRadius = finalRadius === 5 ? 3 : 1;
-            if (finalRadius >= 3 && !isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
-              finalRadius = 1;
+          // Core zone (0-40%): trust the radius, don't downgrade
+          if (pctFromCenter > 0.4) {
+            // Mid/edge zone: check if circle fits
+            if (!isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
+              finalRadius = finalRadius === 5 ? 3 : 1;
+              if (finalRadius >= 3 && !isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
+                finalRadius = 1;
+              }
             }
           }
         }
