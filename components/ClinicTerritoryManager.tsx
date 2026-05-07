@@ -1157,9 +1157,12 @@ User request: ${userMessage}`;
       const optimalRadius = calculateOptimalRadius(totalPolygonArea, MAX_INCLUSIONS, 1.5, metroType);
       console.log(`Optimal radius for coverage: ${optimalRadius} mi`);
 
-      // Step 3: Calculate hex grid spacing for ~50% overlap between adjacent circles
-      // Spacing = radius * 1.5 gives good overlap
-      const hexSpacing = optimalRadius * 1.5;
+      // Step 3: Hex grid candidate density. Spacing was optimalRadius * 1.5, but in
+      // narrow territories adaptive shrinking pushes most circles to ~1mi while
+      // candidates remain 4-5mi apart, leaving gaps. Use a tighter grid so the
+      // selection loop has dense candidates; isTooClose (0.7 × max radius) still
+      // prevents excessive overlap, so wider polygons self-filter naturally.
+      const hexSpacing = Math.max(0.75, optimalRadius * 0.5);
 
       // Step 4: Generate hexagonal grid covering the bounding box
       const gridPoints = generateHexGrid(
