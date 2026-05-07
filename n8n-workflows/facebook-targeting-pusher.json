@@ -5,7 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "push-targeting",
-        "responseMode": "lastNode",
+        "responseMode": "responseNode",
         "options": {}
       },
       "type": "n8n-nodes-base.webhook",
@@ -17,6 +17,19 @@
       "id": "webhook-trigger",
       "name": "Webhook Trigger",
       "webhookId": "push-targeting"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2240,
+        -128
+      ],
+      "id": "respond-webhook",
+      "name": "Respond to Webhook"
     },
     {
       "parameters": {
@@ -507,6 +520,17 @@
         [
           {
             "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
             "type": "main",
             "index": 0
           }

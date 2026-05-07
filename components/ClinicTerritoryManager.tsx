@@ -1586,6 +1586,49 @@ User request: ${userMessage}`;
       lines.push(`TOTAL POINTS: ${sortedInclusions.length + sortedExclusions.length} / 25`);
       lines.push('============================================================');
 
+      // Persist FB Graph targeting payload to clinic_territories.fb_geo_locations
+      // so the Push to Facebook button uses the latest algorithm output, not stale data.
+      setSaveStatus('saving targeting to database...');
+      const fbPayload = {
+        geo_locations: {
+          custom_locations: sortedInclusions.map(loc => ({
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            radius: loc.radius,
+            distance_unit: 'mile',
+            name: loc.address,
+          })),
+          location_types: ['home', 'recent'],
+        },
+        excluded_geo_locations: {
+          custom_locations: sortedExclusions.map(loc => ({
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            radius: loc.radius,
+            distance_unit: 'mile',
+            name: loc.address,
+          })),
+        },
+      };
+      try {
+        const saveRes = await fetch('/api/clinics/save-fb-targeting', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clinic_id: selectedClinic.clinic_id,
+            fb_geo_locations: fbPayload,
+          }),
+        });
+        if (!saveRes.ok) {
+          const err = await saveRes.json().catch(() => ({}));
+          console.error('Save targeting failed:', err);
+          alert(`Targeting generated but not saved to database: ${err.error || saveRes.statusText}. The TXT export will still download, but Push to Facebook will use stale data.`);
+        }
+      } catch (saveErr) {
+        console.error('Save targeting network error:', saveErr);
+        alert('Targeting generated but failed to save to database. TXT export will still download.');
+      }
+
       const textContent = lines.join('\n');
       const blob = new Blob([textContent], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
