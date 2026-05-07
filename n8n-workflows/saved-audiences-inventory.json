@@ -1,0 +1,251 @@
+{
+  "name": "Saved Audiences Inventory",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 400]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "saved-audiences-inventory",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "trigger-webhook",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 200],
+      "webhookId": "saved-audiences-inventory"
+    },
+    {
+      "parameters": {
+        "values": {
+          "boolean": [{"name": "dry_run", "value": false}],
+          "string": [
+            {"name": "supabase_url", "value": "https://xhyttombqrhqvnycyzlj.supabase.co"},
+            {"name": "graph_api", "value": "https://graph.facebook.com/v24.0"}
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config (toggle dry_run)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Emit one item per ad account so the splitInBatches loop processes one account per iteration.\nconst accounts = [\n  'act_10201019819851931',\n  'act_708812601077037',\n  'act_293603336988341',\n  'act_3684421665103341',\n  'act_249137098153238',\n  'act_1738224836936889',\n  'act_1093083055897528'\n];\nconst cfg = $('Config (toggle dry_run)').first().json;\nreturn accounts.map(a => ({ json: { account_id: a, graph_api: cfg.graph_api } }));\n"
+      },
+      "id": "emit-per-account",
+      "name": "Emit Per Account",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop-accounts",
+      "name": "Loop Over Accounts",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Loop Over Accounts').item.json.graph_api }}/{{ $('Loop Over Accounts').item.json.account_id }}/saved_audiences",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "fields", "value": "id,name,description,targeting,time_created,time_updated,approximate_count_lower_bound,approximate_count_upper_bound"},
+            {"name": "limit", "value": "100"}
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.cursors ? $response.body.paging.cursors.after : '' }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body || !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 100,
+              "requestInterval": 200
+            }
+          }
+        }
+      },
+      "id": "list-sa",
+      "name": "List Saved Audiences",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Inside the loop iteration: all pages here belong to the current account.\n// Flatten + classify and emit one item per audience.\nconst accountId = $('Loop Over Accounts').item.json.account_id;\nconst pages = $input.all();\n\nfunction classify(t) {\n  if (!t || typeof t !== 'object') return 'unknown';\n  const geo = t.geo_locations || {};\n  const hasCustomLocs = Array.isArray(geo.custom_locations) && geo.custom_locations.length > 0;\n  if (hasCustomLocs) return 'drive_time';\n  if (Array.isArray(t.custom_audiences) && t.custom_audiences.length > 0) return 'lookalike_or_custom';\n  const hasGeo = (Array.isArray(geo.cities) && geo.cities.length) ||\n                 (Array.isArray(geo.zips) && geo.zips.length) ||\n                 (Array.isArray(geo.countries) && geo.countries.length) ||\n                 (Array.isArray(geo.regions) && geo.regions.length);\n  if (hasGeo) return 'legacy_geo';\n  const hasInterest = (Array.isArray(t.interests) && t.interests.length) ||\n                      (Array.isArray(t.behaviors) && t.behaviors.length) ||\n                      (Array.isArray(t.flexible_spec) && t.flexible_spec.length);\n  if (hasInterest) return 'interest';\n  return 'unknown';\n}\n\nfunction extractData(item) {\n  const j = item.json;\n  if (Array.isArray(j)) return j;\n  if (Array.isArray(j.data)) return j.data;\n  if (Array.isArray(j.body?.data)) return j.body.data;\n  return [];\n}\n\nconst rows = [];\nfor (const page of pages) {\n  for (const a of extractData(page)) {\n    const t = a.targeting || {};\n    const geo = t.geo_locations || {};\n    const excludedGeo = t.excluded_geo_locations || {};\n    const customLocs = Array.isArray(geo.custom_locations) ? geo.custom_locations : [];\n    const excludedCustomLocs = Array.isArray(excludedGeo.custom_locations) ? excludedGeo.custom_locations : [];\n    const excludedCities = Array.isArray(excludedGeo.cities) ? excludedGeo.cities : [];\n    const excludedZips = Array.isArray(excludedGeo.zips) ? excludedGeo.zips : [];\n    const excludedAny = excludedCustomLocs.length + excludedCities.length + excludedZips.length;\n    rows.push({\n      account_id: accountId,\n      audience_id: a.id,\n      name: a.name || null,\n      description: a.description || null,\n      kind: classify(t),\n      has_custom_locations: customLocs.length > 0,\n      has_excluded_geo: excludedAny > 0,\n      custom_location_count: customLocs.length,\n      excluded_location_count: excludedAny,\n      cities: Array.isArray(geo.cities) ? geo.cities.map(c => c.name || c.key || String(c)) : [],\n      zips: Array.isArray(geo.zips) ? geo.zips.map(z => z.name || z.key || String(z)) : [],\n      countries: Array.isArray(geo.countries) ? geo.countries : [],\n      age_min: t.age_min ?? null,\n      age_max: t.age_max ?? null,\n      approximate_count_lower: a.approximate_count_lower_bound ?? null,\n      approximate_count_upper: a.approximate_count_upper_bound ?? null,\n      targeting: t,\n      time_created: a.time_created || null,\n      time_updated: a.time_updated || null\n    });\n  }\n}\n\nreturn rows.map(r => ({ json: r }));\n"
+      },
+      "id": "classify",
+      "name": "Classify Audiences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Append rows from this iteration into a workflow-static collector\nconst incoming = $input.all().map(i => i.json);\nconst staticData = $getWorkflowStaticData('global');\nstaticData.rows = (staticData.rows || []).concat(incoming);\nreturn [{ json: { iteration_rows: incoming.length, total_so_far: staticData.rows.length } }];\n"
+      },
+      "id": "collect",
+      "name": "Collect Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// After loop completes, drain the static-data collector and emit one item per row\nconst staticData = $getWorkflowStaticData('global');\nconst rows = staticData.rows || [];\nstaticData.rows = []; // reset for next run\nreturn rows.map(r => ({ json: r }));\n"
+      },
+      "id": "drain",
+      "name": "Drain Collector",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Always summarize from Drain Collector's output (the full row set), regardless of which branch led here.\nconst rows = $('Drain Collector').all().map(i => i.json);\nconst dryRun = $('Config (toggle dry_run)').first().json.dry_run;\nconst byAccountKind = {};\nconst kindTotals = {};\nfor (const r of rows) {\n  byAccountKind[r.account_id] = byAccountKind[r.account_id] || {};\n  byAccountKind[r.account_id][r.kind] = (byAccountKind[r.account_id][r.kind] || 0) + 1;\n  kindTotals[r.kind] = (kindTotals[r.kind] || 0) + 1;\n}\nconst samplesByKind = {};\nfor (const r of rows) {\n  if (!samplesByKind[r.kind]) samplesByKind[r.kind] = [];\n  if (samplesByKind[r.kind].length < 5) samplesByKind[r.kind].push({\n    account_id: r.account_id, audience_id: r.audience_id, name: r.name,\n    custom_location_count: r.custom_location_count, has_excluded_geo: r.has_excluded_geo\n  });\n}\nreturn [{ json: { mode: dryRun ? 'dry_run' : 'persisted', total_rows: rows.length, kind_totals: kindTotals, by_account_kind: byAccountKind, samples_by_kind: samplesByKind } }];\n"
+      },
+      "id": "report",
+      "name": "Build Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Config (toggle dry_run)').first().json.dry_run }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "id": "if-write",
+      "name": "If Persist to Supabase",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1340, 100]
+    },
+    {
+      "parameters": {
+        "batchSize": 100,
+        "options": {}
+      },
+      "id": "batch-rows",
+      "name": "Batch 100 Rows",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1560, 240]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst body = items.map(i => ({ ...i.json, last_seen: new Date().toISOString() }));\nreturn [{ json: { rows: body, count: body.length } }];\n"
+      },
+      "id": "shape-batch",
+      "name": "Shape Batch Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config (toggle dry_run)').first().json.supabase_url }}/rest/v1/fb_saved_audiences",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "Prefer", "value": "resolution=merge-duplicates,return=minimal"}
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "on_conflict", "value": "account_id,audience_id"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.rows) }}",
+        "options": {}
+      },
+      "id": "upsert",
+      "name": "Upsert Batch to Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 320],
+      "credentials": {
+        "supabaseApi": {
+          "id": "9wxMVkfSJBYoL43Q",
+          "name": "Supabase account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {"main": [[{"node": "Config (toggle dry_run)", "type": "main", "index": 0}]]},
+    "Webhook Trigger": {"main": [[{"node": "Config (toggle dry_run)", "type": "main", "index": 0}]]},
+    "Config (toggle dry_run)": {"main": [[{"node": "Emit Per Account", "type": "main", "index": 0}]]},
+    "Emit Per Account": {"main": [[{"node": "Loop Over Accounts", "type": "main", "index": 0}]]},
+    "Loop Over Accounts": {"main": [
+      [{"node": "Drain Collector", "type": "main", "index": 0}],
+      [{"node": "List Saved Audiences", "type": "main", "index": 0}]
+    ]},
+    "List Saved Audiences": {"main": [[{"node": "Classify Audiences", "type": "main", "index": 0}]]},
+    "Classify Audiences": {"main": [[{"node": "Collect Rows", "type": "main", "index": 0}]]},
+    "Collect Rows": {"main": [[{"node": "Loop Over Accounts", "type": "main", "index": 0}]]},
+    "Drain Collector": {"main": [[{"node": "If Persist to Supabase", "type": "main", "index": 0}]]},
+    "If Persist to Supabase": {"main": [
+      [{"node": "Batch 100 Rows", "type": "main", "index": 0}],
+      [{"node": "Build Report", "type": "main", "index": 0}]
+    ]},
+    "Batch 100 Rows": {"main": [
+      [{"node": "Build Report", "type": "main", "index": 0}],
+      [{"node": "Shape Batch Body", "type": "main", "index": 0}]
+    ]},
+    "Shape Batch Body": {"main": [[{"node": "Upsert Batch to Supabase", "type": "main", "index": 0}]]},
+    "Upsert Batch to Supabase": {"main": [[{"node": "Batch 100 Rows", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1"}
+}

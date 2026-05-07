@@ -4,7 +4,7 @@ export { useChat } from './hooks/useChat';
 
 // Server-side exports
 export { ClaudeClient, createClaudeClient } from './core/claude-client';
-export { createToolRegistry, createDatabaseTools, createWriteTools } from './core/tool-registry';
+export { createToolRegistry, createDatabaseTools, createWriteTools, createVectorTools, type VectorToolsConfig } from './core/tool-registry';
 export { createSupabaseAdapter } from './adapters/supabase-adapter';
 
 // Types

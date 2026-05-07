@@ -1,0 +1,664 @@
+{
+  "name": "Facebook Targeting Pusher",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "push-targeting",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "webhookId": "push-targeting"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Emit a single item carrying the full payload (clinics array + account list)\n// so downstream pre-fetch + clinic loop can each access what they need.\nconst input = $input.first().json.body || $input.first().json;\nconst clinics = input.clinics || [];\nconst dryRun = input.dry_run || false;\nconst mode = input.mode || 'single';\n\nif (clinics.length === 0) {\n  return [{ json: { error: 'No clinics provided', clinics: [], account_ids: [], dry_run: dryRun, mode } }];\n}\n\nreturn [{ json: {\n  dry_run: dryRun,\n  mode,\n  clinics,\n  account_ids: [\"act_10201019819851931\", \"act_708812601077037\", \"act_293603336988341\", \"act_3684421665103341\", \"act_249137098153238\", \"act_1738224836936889\", \"act_1093083055897528\"]\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "parse-input",
+      "name": "Parse Input"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        448,
+        0
+      ],
+      "id": "loop-clinics",
+      "name": "Loop Over Clinics"
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v24.0/{{ $json.campaign_id }}/adsets",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,name,targeting,status"
+            },
+            {
+              "name": "limit",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1104,
+        0
+      ],
+      "id": "get-adsets",
+      "name": "Get Ad Sets",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build new targeting per ad set, skip if upstream emitted a no-match placeholder.\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  if (item.json.skip) {\n    // Pass through skip marker so loop still completes\n    results.push({ json: { skip: true, clinic_id: item.json.clinic_id, clinic_name: item.json.clinic_name, reason: item.json.reason } });\n    continue;\n  }\n  const adsets = item.json.body?.data || item.json.data || [];\n  const fbGeoLocations = item.json.fb_geo_locations;\n  const dryRun = item.json.dry_run;\n  const clinicId = item.json.clinic_id;\n  const clinicName = item.json.clinic_name;\n  const campaignName = item.json.campaign_name;\n\n  for (const adset of adsets) {\n    if (!['ACTIVE', 'PAUSED'].includes(adset.status)) continue;\n    const currentTargeting = adset.targeting || {};\n    const newTargeting = { ...currentTargeting };\n    if (fbGeoLocations.geo_locations) newTargeting.geo_locations = fbGeoLocations.geo_locations;\n    if (fbGeoLocations.excluded_geo_locations) newTargeting.excluded_geo_locations = fbGeoLocations.excluded_geo_locations;\n    if (newTargeting.geo_locations && !newTargeting.geo_locations.location_types) {\n      newTargeting.geo_locations.location_types = ['home', 'recent'];\n    }\n    results.push({ json: {\n      adset_id: adset.id,\n      adset_name: adset.name,\n      adset_status: adset.status,\n      clinic_id: clinicId,\n      clinic_name: clinicName,\n      campaign_name: campaignName,\n      new_targeting: newTargeting,\n      dry_run: dryRun\n    }});\n  }\n}\n\nif (results.length === 0) {\n  return [{ json: { skip: true, reason: 'no eligible ad sets' } }];\n}\nreturn results;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        0
+      ],
+      "id": "build-targeting",
+      "name": "Build Targeting Payload"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.dry_run === true || $json.skip === true }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        0
+      ],
+      "id": "filter-updates",
+      "name": "If Dry Run"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v24.0/{{ $json.adset_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ targeting: $json.new_targeting }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1760,
+        0
+      ],
+      "id": "update-adset",
+      "name": "Update Ad Set Targeting",
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate results per clinic from BOTH branches:\n// - Ad-set updates (fields: adset_id, body, statusCode) \u2014 successes/errors/skips\n// - Saved-audience updates (fields: sa_account_id, sa_saved_audience_id, sa_success)\n// Skip detection: dry_run flag, skip marker (from Match/Build), or no body data.\nconst items = $input.all();\nconst clinicResults = {};\nconst savedAudienceResults = [];\n\nfor (const item of items) {\n  const d = item.json;\n  const clinicId = d.clinic_id;\n  if (!clinicId) continue;\n\n  // Saved-audience branch item\n  if (d.sa_account_id) {\n    let status = 'error';\n    if (d.sa_success) status = 'updated';\n    else if (d.dry_run) status = 'skipped';\n    else if (d.sa_skipped) status = 'skipped';\n    savedAudienceResults.push({\n      clinic_id: clinicId,\n      account_id: d.sa_account_id,\n      saved_audience_id: d.sa_saved_audience_id,\n      status,\n      ...(d.sa_error ? { error: d.sa_error } : {})\n    });\n    continue;\n  }\n\n  // Ad-set branch item\n  if (!clinicResults[clinicId]) {\n    clinicResults[clinicId] = {\n      clinic_id: clinicId,\n      clinic_name: d.clinic_name,\n      adsets_updated: 0,\n      adsets_errors: 0,\n      adsets_skipped: 0,\n      details: []\n    };\n  }\n\n  const isSkip = d.skip === true || d.dry_run === true || (!d.body && !d.statusCode);\n  const success = d.body?.success === true || d.statusCode === 200;\n\n  if (success) {\n    clinicResults[clinicId].adsets_updated++;\n  } else if (isSkip) {\n    clinicResults[clinicId].adsets_skipped++;\n  } else {\n    clinicResults[clinicId].adsets_errors++;\n    clinicResults[clinicId].details.push({\n      adset_id: d.adset_id,\n      error: d.body?.error?.message || `HTTP ${d.statusCode || '?'}`\n    });\n  }\n}\n\n// Per-clinic status\nconst results = Object.values(clinicResults).map(r => ({\n  ...r,\n  status: r.adsets_updated > 0 ? 'updated'\n        : r.adsets_skipped > 0 && r.adsets_errors === 0 ? 'skipped'\n        : 'error'\n}));\n\nlet updated = 0, skipped = 0, errors = 0;\nfor (const r of results) {\n  if (r.status === 'updated') updated++;\n  else if (r.status === 'skipped') skipped++;\n  else errors++;\n}\n\nlet saUpdated = 0, saErrors = 0, saSkipped = 0;\nfor (const r of savedAudienceResults) {\n  if (r.status === 'updated') saUpdated++;\n  else if (r.status === 'error') saErrors++;\n  else if (r.status === 'skipped') saSkipped++;\n}\n\nreturn [{\n  json: {\n    success: true,\n    results,\n    saved_audience_results: savedAudienceResults,\n    summary: {\n      updated, skipped, errors,\n      saved_audiences: { updated: saUpdated, errors: saErrors, skipped: saSkipped }\n    }\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        -128
+      ],
+      "id": "format-response",
+      "name": "Format Response"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1980,
+        100
+      ],
+      "id": "rate-limit-wait",
+      "name": "Rate Limit Wait",
+      "webhookId": "rate-limit-wait"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        672,
+        -304
+      ],
+      "id": "loop-done",
+      "name": "Loop Done"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://xhyttombqrhqvnycyzlj.supabase.co/rest/v1/fb_saved_audiences",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "select", "value": "account_id,audience_id"},
+            {"name": "kind", "value": "eq.drive_time"}
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Prefer", "value": "count=none"}
+          ]
+        },
+        "options": {}
+      },
+      "id": "fetch-drive-time-set",
+      "name": "Fetch Drive-Time Audience Set",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [468, 1056],
+      "credentials": {
+        "supabaseApi": {
+          "id": "9wxMVkfSJBYoL43Q",
+          "name": "Supabase account"
+        }
+      },
+      "notes": "Loads (account_id, audience_id) tuples classified as drive_time. Fan-out below filters out legacy_geo/unknown audiences so the pusher only updates audiences we manage."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fan out clinics \u00d7 accounts to one item per (clinic, account) where a saved audience exists\n// AND the audience is classified as drive_time in fb_saved_audiences. legacy_geo / unknown\n// audiences are skipped (and reported as such) so we don't blow away hand-crafted targeting.\nconst cfg = $('Parse Input').first().json;\nconst clinics = cfg.clinics || [];\n\n// Build set of allowed (account_id|audience_id) keys from Supabase response\nconst rows = ($input.first().json.data || $input.first().json || []);\nconst allowed = new Set();\nfor (const r of (Array.isArray(rows) ? rows : [])) {\n  if (r.account_id && r.audience_id) allowed.add(`${r.account_id}|${r.audience_id}`);\n}\n\nconst out = [];\nfor (const c of clinics) {\n  const ids = c.fb_saved_audience_ids || {};\n  for (const [accountId, savedAudienceId] of Object.entries(ids)) {\n    if (!savedAudienceId) continue;\n    const key = `${accountId}|${savedAudienceId}`;\n    if (!allowed.has(key)) {\n      // emit a skip marker so Format Response can report it\n      out.push({ json: {\n        clinic_id: c.clinic_id,\n        clinic_name: c.clinic_name,\n        sa_account_id: accountId,\n        sa_saved_audience_id: savedAudienceId,\n        sa_skipped: true,\n        sa_skip_reason: 'not_drive_time',\n        sa_success: false,\n        dry_run: cfg.dry_run\n      }});\n      continue;\n    }\n    out.push({ json: {\n      clinic_id: c.clinic_id,\n      clinic_name: c.clinic_name,\n      fb_geo_locations: c.fb_geo_locations,\n      dry_run: cfg.dry_run,\n      sa_account_id: accountId,\n      sa_saved_audience_id: savedAudienceId\n    }});\n  }\n}\nreturn out;\n"
+      },
+      "id": "fanout-sa",
+      "name": "Fan-out Saved Audiences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.dry_run === true || $json.sa_skipped === true }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "filter-dry-run-sa",
+      "name": "If Dry Run (SA)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v24.0/{{ $json.sa_saved_audience_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ targeting: { geo_locations: $json.fb_geo_locations.geo_locations, excluded_geo_locations: $json.fb_geo_locations.excluded_geo_locations, targeting_optimization: 'none', targeting_relaxation_types: { lookalike: 0, custom_audience: 0 } } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "update-sa",
+      "name": "Update Saved Audience",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1152,
+        1056
+      ],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      },
+      "notes": "Dual-write: also update the Meta saved audience referenced by this clinic. Forked ad sets won't be backfilled, but new ad sets that reference the saved audience will inherit the update."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tag the response with clinic_id + account_id so Format Response can route it\nconst r = $input.first().json;\nconst src = $('Fan-out Saved Audiences').item.json;\nconst ok = r.statusCode >= 200 && r.statusCode < 300 && !r.body?.error;\nreturn [{ json: {\n  clinic_id: src.clinic_id,\n  clinic_name: src.clinic_name,\n  sa_account_id: src.sa_account_id,\n  sa_saved_audience_id: src.sa_saved_audience_id,\n  sa_success: ok,\n  sa_error: ok ? null : (r.body?.error?.message || `HTTP ${r.statusCode}`)\n}}];\n"
+      },
+      "id": "tag-sa-result",
+      "name": "Tag SA Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1376,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Spread to one item per ad account so HTTP iterates per-item\nconst cfg = $input.first().json;\nreturn cfg.account_ids.map(account_id => ({ json: { account_id, dry_run: cfg.dry_run, mode: cfg.mode, clinics: cfg.clinics } }));\n"
+      },
+      "id": "spread-accounts",
+      "name": "Spread to 7 Accounts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v24.0/{{ $('Spread to 7 Accounts').item.json.account_id }}/campaigns",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,name,status"
+            },
+            {
+              "name": "limit",
+              "value": "200"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.cursors ? $response.body.paging.cursors.after : '' }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body || !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 200
+            }
+          }
+        }
+      },
+      "id": "list-camps-all",
+      "name": "List Campaigns (All Accounts)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        -200
+      ],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate per-account campaign responses into a single cache: { campaigns: {acct: [...]} }\n// HTTP pagination produces multiple items per source account; use pairedItem to map\n// each page back to its source.\nconst accounts = $('Spread to 7 Accounts').all();\nconst respItems = $input.all();\n\nfunction extractData(item) {\n  const j = item.json;\n  if (Array.isArray(j)) return j;\n  if (Array.isArray(j.data)) return j.data;\n  if (Array.isArray(j.body?.data)) return j.body.data;\n  return [];\n}\n\nfunction sourceIndex(item) {\n  const p = item.pairedItem;\n  if (typeof p === 'number') return p;\n  if (Array.isArray(p) && p.length) return p[0].item ?? 0;\n  if (p && typeof p === 'object') return p.item ?? 0;\n  return 0;\n}\n\nconst cache = { campaigns: {} };\nfor (const a of accounts) cache.campaigns[a.json.account_id] = [];\n\nfor (const item of respItems) {\n  const idx = sourceIndex(item);\n  const acct = accounts[idx]?.json.account_id;\n  if (!acct) continue;\n  cache.campaigns[acct].push(...extractData(item));\n}\n\nconst orig = $('Parse Input').first().json;\nreturn [{ json: {\n  dry_run: orig.dry_run,\n  mode: orig.mode,\n  clinics: orig.clinics,\n  account_ids: orig.account_ids,\n  cache\n}}];\n"
+      },
+      "id": "aggregate-camp-cache",
+      "name": "Aggregate Cache",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Spread the clinics array into one item per clinic, ready for Loop Over Clinics.\n// Each item carries the dry_run flag and a reference to access the cache via $('Aggregate Cache').\nconst cfg = $input.first().json;\nreturn cfg.clinics.map(c => ({ json: {\n  clinic_id: c.clinic_id,\n  clinic_name: c.clinic_name,\n  fb_geo_locations: c.fb_geo_locations,\n  fb_saved_audience_ids: c.fb_saved_audience_ids || {},\n  dry_run: cfg.dry_run,\n  mode: cfg.mode,\n  account_ids: cfg.account_ids\n}}));\n"
+      },
+      "id": "spread-clinics",
+      "name": "Spread Clinics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Match this clinic's campaigns from the pre-fetched cache (no HTTP call).\n// Filter campaigns whose name contains the clinic name and status is ACTIVE/PAUSED.\n// Emit one item per matched campaign for the downstream Get Ad Sets node.\nconst clinic = $('Loop Over Clinics').item.json;\nconst cache = $('Aggregate Cache').first().json.cache;\nconst clinicNameLc = clinic.clinic_name.toLowerCase();\n\nconst matches = [];\nfor (const accountId of clinic.account_ids) {\n  const camps = cache.campaigns[accountId] || [];\n  for (const c of camps) {\n    if (c.name && c.name.toLowerCase().includes(clinicNameLc) && ['ACTIVE','PAUSED'].includes(c.status)) {\n      matches.push({ json: {\n        ...clinic,\n        campaign_id: c.id,\n        campaign_name: c.name,\n        campaign_status: c.status,\n        account_id: accountId\n      }});\n    }\n  }\n}\n\nif (matches.length === 0) {\n  // emit a placeholder so the loop iteration completes (skip downstream via flag)\n  return [{ json: { ...clinic, skip: true, reason: 'no campaigns matched' } }];\n}\nreturn matches;\n"
+      },
+      "id": "match-camps",
+      "name": "Match Campaigns for Clinic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input": {
+      "main": [
+        [
+          {
+            "node": "Spread to 7 Accounts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Drive-Time Audience Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Drive-Time Audience Set": {
+      "main": [
+        [
+          {
+            "node": "Fan-out Saved Audiences",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Clinics": {
+      "main": [
+        [
+          {
+            "node": "Loop Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Match Campaigns for Clinic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Ad Sets": {
+      "main": [
+        [
+          {
+            "node": "Build Targeting Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Targeting Payload": {
+      "main": [
+        [
+          {
+            "node": "If Dry Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Ad Set Targeting": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Done": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan-out Saved Audiences": {
+      "main": [
+        [
+          {
+            "node": "If Dry Run (SA)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Saved Audience": {
+      "main": [
+        [
+          {
+            "node": "Tag SA Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag SA Result": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Dry Run": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Clinics",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Ad Set Targeting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit Wait": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Clinics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Dry Run (SA)": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Saved Audience",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spread to 7 Accounts": {
+      "main": [
+        [
+          {
+            "node": "List Campaigns (All Accounts)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Campaigns (All Accounts)": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Cache": {
+      "main": [
+        [
+          {
+            "node": "Spread Clinics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spread Clinics": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Clinics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Campaigns for Clinic": {
+      "main": [
+        [
+          {
+            "node": "Get Ad Sets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "8c407b69-ff90-460a-8a0e-06f6ad742ff5",
+  "meta": {
+    "instanceId": "52e08a281bf4569f041540f0524e0baaa13e6bbd1ca9392ecde2cb4240eac4c8"
+  },
+  "id": "2rsUMZ9PGXKHP1qj",
+  "tags": []
+}

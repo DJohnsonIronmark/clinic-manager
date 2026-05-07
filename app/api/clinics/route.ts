@@ -7,9 +7,11 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY!
 );
 
-// Fetch all rows by paginating in chunks to bypass 1000 row limit
+// Fetch all rows by paginating in chunks to bypass 1000 row limit.
+// orderBy is required — without a stable sort, Postgres may return rows in
+// different orders across paginated calls and silently drop or duplicate rows.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function fetchAllRows(table: string, columns: string): Promise<any[]> {
+async function fetchAllRows(table: string, columns: string, orderBy: string): Promise<any[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const allRows: any[] = [];
   let offset = 0;
@@ -19,6 +21,7 @@ async function fetchAllRows(table: string, columns: string): Promise<any[]> {
     const { data, error } = await supabase
       .from(table)
       .select(columns)
+      .order(orderBy, { ascending: true })
       .range(offset, offset + pageSize - 1);
 
     if (error) throw new Error(`${table} error: ${error.message}`);
@@ -36,8 +39,8 @@ export async function GET() {
   try {
     // Fetch both tables with pagination to get ALL rows
     const [territories, locations] = await Promise.all([
-      fetchAllRows('clinic_territories', 'clinic_id,clinic_name,state,city,metro_type'),
-      fetchAllRows('TJC Locations GeoCoded', 'ClinicID,Name,Address,City,State,latitude,longitude'),
+      fetchAllRows('clinic_territories', 'clinic_id,clinic_name,state,city,metro_type', 'clinic_id'),
+      fetchAllRows('TJC Locations GeoCoded', 'ClinicID,Name,Address,City,State,latitude,longitude', 'ClinicID'),
     ]);
 
     console.log('Fetched:', territories.length, 'territories,', locations.length, 'locations');

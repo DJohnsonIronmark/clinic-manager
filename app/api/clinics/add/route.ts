@@ -60,36 +60,61 @@ async function generateIsochrones(lng: number, lat: number): Promise<IsochroneFe
   return data.features || null;
 }
 
-// Determine metro type based on population density or default to Suburban
+// Determine metro type based on population density or default to suburban.
+// Existing convention in clinic_territories.metro_type is lowercase
+// ('urban' | 'suburban' | 'rural') — must match for downstream filters.
 function determineMetroType(state: string, city: string): string {
-  // Simple heuristic - could be enhanced with actual population data
   const urbanCities = ['new york', 'los angeles', 'chicago', 'houston', 'phoenix', 'philadelphia', 'san antonio', 'san diego', 'dallas', 'san jose', 'austin', 'jacksonville', 'fort worth', 'columbus', 'charlotte', 'san francisco', 'indianapolis', 'seattle', 'denver', 'boston', 'nashville', 'detroit', 'portland', 'las vegas', 'miami', 'atlanta'];
 
   const cityLower = city.toLowerCase();
   if (urbanCities.some(uc => cityLower.includes(uc))) {
-    return 'Urban';
+    return 'urban';
   }
 
-  // Default to Suburban
-  return 'Suburban';
+  return 'suburban';
 }
 
-// Extract city and state from geocoded address
+// US state full name → 2-letter code, for "TJC Locations GeoCoded".State
+// (clinic_territories.state uses full names; the locations table uses codes).
+const STATE_NAME_TO_CODE: Record<string, string> = {
+  'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
+  'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'District of Columbia': 'DC',
+  'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL',
+  'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA',
+  'Maine': 'ME', 'Maryland': 'MD', 'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN',
+  'Mississippi': 'MS', 'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
+  'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY',
+  'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK', 'Oregon': 'OR',
+  'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC', 'South Dakota': 'SD',
+  'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT', 'Virginia': 'VA',
+  'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY'
+};
+
+function stateToCode(state: string): string {
+  if (!state) return state;
+  if (state.length === 2) return state.toUpperCase();
+  return STATE_NAME_TO_CODE[state] || state;
+}
+
+// Extract city and state from geocoded address.
+// Mapbox place_name: "123 Main St, City, State ZIP, United States"
+// Strip the trailing ZIP (5 or ZIP+4) to keep multi-word states intact
+// ("Rhode Island", "New York", "North Carolina"), which the previous
+// split(' ')[0] truncated to "Rhode" / "New" / "North".
 function extractCityState(placeName: string): { city: string; state: string } {
   const parts = placeName.split(',').map(p => p.trim());
-  // Typical format: "123 Main St, City, State ZIP, United States"
   let city = '';
-  let state = '';
+  let stateZip = '';
 
   if (parts.length >= 3) {
     city = parts[parts.length - 3];
-    const stateZip = parts[parts.length - 2];
-    state = stateZip.split(' ')[0];
+    stateZip = parts[parts.length - 2];
   } else if (parts.length >= 2) {
     city = parts[0];
-    state = parts[1].split(' ')[0];
+    stateZip = parts[1];
   }
 
+  const state = stateZip.replace(/\s+\d{5}(-\d{4})?$/, '').trim();
   return { city, state };
 }
 
@@ -137,7 +162,7 @@ export async function POST(request: NextRequest) {
 
     // Select the appropriate isochrone based on metro type
     // Index: 0=30min, 1=20min, 2=15min, 3=10min
-    const isochroneIndex = metro_type === 'Urban' ? 2 : metro_type === 'Rural' ? 0 : 1;
+    const isochroneIndex = metro_type === 'urban' ? 2 : metro_type === 'rural' ? 0 : 1;
     const selectedIsochrone = isochrones[isochroneIndex]?.geometry || isochrones[0]?.geometry;
 
     // Step 4: Check if clinic_id already exists
@@ -228,7 +253,7 @@ export async function POST(request: NextRequest) {
           Name: clinic_name,
           Address: address,
           City: city,
-          State: state,
+          State: stateToCode(state),
           latitude: lat,
           longitude: lng
         })
@@ -253,7 +278,7 @@ export async function POST(request: NextRequest) {
           batchCount++;
 
           const overlapResponse = await fetch(
-            `${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_by_distance_batch`,
+            `${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_with_buffer`,
             {
               method: 'POST',
               headers: {
@@ -263,7 +288,8 @@ export async function POST(request: NextRequest) {
               },
               body: JSON.stringify({
                 p_state: state,
-                p_batch_size: batchSize
+                p_batch_size: batchSize,
+                p_buffer_miles: 2.0
               })
             }
           );

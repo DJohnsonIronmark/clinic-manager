@@ -1,6 +1,9 @@
 import type { Tool } from '@anthropic-ai/sdk/resources/messages';
 import type { ChatTool, ToolRegistry, DataAdapter, WritableDataAdapter } from '../types';
 
+// Re-export vector tools
+export { createVectorTools, type VectorToolsConfig } from './vector-tools';
+
 export function createToolRegistry(): ToolRegistry {
   const tools: ChatTool[] = [];
 

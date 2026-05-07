@@ -188,3 +188,380 @@ export const selectRadii = (size: number, count: number): number[] => {
   if (size < 60) return [5, 10, 15, 5, 10, 15, 5, 10, 15, 5].slice(0, count);
   return [10, 15, 25, 10, 15, 25, 10, 15, 25, 10].slice(0, count);
 };
+
+// Calculate distance from a point to the nearest polygon edge (in miles)
+// Uses proper perpendicular distance to each edge segment
+export const getDistanceToPolygonEdge = (
+  testLat: number,
+  testLng: number,
+  coords: number[][]
+): number => {
+  let minDist = Infinity;
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const [lng1, lat1] = coords[i];
+    const [lng2, lat2] = coords[i + 1];
+
+    // Convert to local cartesian approximation for edge distance
+    const latMid = (lat1 + lat2 + testLat) / 3;
+    const lngScale = Math.cos(latMid * Math.PI / 180);
+
+    // Normalize coordinates to miles (approx)
+    const x = testLng * lngScale * 69;
+    const y = testLat * 69;
+    const x1 = lng1 * lngScale * 69;
+    const y1 = lat1 * 69;
+    const x2 = lng2 * lngScale * 69;
+    const y2 = lat2 * 69;
+
+    // Calculate perpendicular distance to segment
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+
+    let dist: number;
+    if (lenSq === 0) {
+      // Segment is a point
+      dist = Math.sqrt((x - x1) * (x - x1) + (y - y1) * (y - y1));
+    } else {
+      // Project point onto line segment
+      let t = ((x - x1) * dx + (y - y1) * dy) / lenSq;
+      t = Math.max(0, Math.min(1, t)); // Clamp to segment
+
+      const projX = x1 + t * dx;
+      const projY = y1 + t * dy;
+      dist = Math.sqrt((x - projX) * (x - projX) + (y - projY) * (y - projY));
+    }
+
+    if (dist < minDist) minDist = dist;
+  }
+
+  return minDist;
+};
+
+// Get maximum safe radius that keeps most of the circle inside the polygon
+// Returns the largest radius from [1, 2, 3, 5] that has >75% coverage inside
+export const getMaxSafeRadius = (
+  centerLat: number,
+  centerLng: number,
+  coords: number[][],
+  availableRadii: number[] = [1, 2, 3, 5]
+): number => {
+  const distToEdge = getDistanceToPolygonEdge(centerLat, centerLng, coords);
+
+  // If distance to edge is large, use largest radius
+  const sortedRadii = [...availableRadii].sort((a, b) => b - a);
+
+  for (const radius of sortedRadii) {
+    // If distance to edge is at least 75% of radius, the circle fits well
+    if (distToEdge >= radius * 0.75) {
+      return radius;
+    }
+  }
+
+  // Return smallest radius
+  return sortedRadii[sortedRadii.length - 1];
+};
+
+// Sample evenly spaced points along polygon perimeter
+// Returns points offset inward by the given distance
+export const samplePolygonPerimeter = (
+  coords: number[][],
+  numPoints: number,
+  inwardOffsetMiles: number = 0.5
+): Array<{ lat: number; lng: number }> => {
+  const points: Array<{ lat: number; lng: number }> = [];
+
+  // Calculate total perimeter length and segment lengths
+  const segmentLengths: number[] = [];
+  let totalLength = 0;
+
+  for (let i = 0; i < coords.length - 1; i++) {
+    const [lng1, lat1] = coords[i];
+    const [lng2, lat2] = coords[i + 1];
+    const len = calculateDistance(lat1, lng1, lat2, lng2);
+    segmentLengths.push(len);
+    totalLength += len;
+  }
+
+  // Sample evenly spaced points
+  const spacing = totalLength / numPoints;
+  let accumulatedLength = 0;
+  let segmentIndex = 0;
+  let segmentOffset = 0;
+
+  for (let i = 0; i < numPoints; i++) {
+    const targetLength = i * spacing;
+
+    // Advance to correct segment
+    while (segmentIndex < segmentLengths.length - 1 &&
+           accumulatedLength + segmentLengths[segmentIndex] < targetLength) {
+      accumulatedLength += segmentLengths[segmentIndex];
+      segmentIndex++;
+    }
+
+    // Interpolate within segment
+    const segmentLen = segmentLengths[segmentIndex];
+    const t = segmentLen > 0 ? (targetLength - accumulatedLength) / segmentLen : 0;
+
+    const [lng1, lat1] = coords[segmentIndex];
+    const [lng2, lat2] = coords[segmentIndex + 1] || coords[segmentIndex];
+
+    const pointLat = lat1 + t * (lat2 - lat1);
+    const pointLng = lng1 + t * (lng2 - lng1);
+
+    // Calculate inward offset direction (perpendicular to edge, pointing inward)
+    // Use polygon centroid to determine inward direction
+    const centroidLat = coords.reduce((sum, c) => sum + c[1], 0) / coords.length;
+    const centroidLng = coords.reduce((sum, c) => sum + c[0], 0) / coords.length;
+
+    // Direction from perimeter point toward centroid
+    const dirLat = centroidLat - pointLat;
+    const dirLng = centroidLng - pointLng;
+    const dirLen = Math.sqrt(dirLat * dirLat + dirLng * dirLng);
+
+    if (dirLen > 0) {
+      // Convert offset to degrees (approximate)
+      const offsetLat = (inwardOffsetMiles / 69) * (dirLat / dirLen);
+      const offsetLng = (inwardOffsetMiles / (69 * Math.cos(pointLat * Math.PI / 180))) * (dirLng / dirLen);
+
+      points.push({
+        lat: pointLat + offsetLat,
+        lng: pointLng + offsetLng
+      });
+    }
+  }
+
+  return points;
+};
+
+// Estimate what percentage of a circle is inside the polygon using Monte Carlo sampling
+export const estimateCircleCoverage = (
+  centerLat: number,
+  centerLng: number,
+  radiusMiles: number,
+  coords: number[][],
+  sampleCount: number = 16
+): { insidePercent: number; outsidePercent: number } => {
+  let insideCount = 0;
+
+  // Sample points around circle
+  for (let i = 0; i < sampleCount; i++) {
+    const angle = (i / sampleCount) * 2 * Math.PI;
+    const sampleLat = centerLat + (radiusMiles / 69) * Math.sin(angle);
+    const sampleLng = centerLng + (radiusMiles / (69 * Math.cos(centerLat * Math.PI / 180))) * Math.cos(angle);
+
+    if (isPointInPolygon([sampleLng, sampleLat], coords as [number, number][])) {
+      insideCount++;
+    }
+  }
+
+  // Also check center point (weights coverage toward center)
+  if (isPointInPolygon([centerLng, centerLat], coords as [number, number][])) {
+    insideCount += 4; // Weight center point heavily
+  }
+
+  const totalSamples = sampleCount + 4;
+  const insidePercent = (insideCount / totalSamples) * 100;
+
+  return {
+    insidePercent: Math.round(insidePercent),
+    outsidePercent: Math.round(100 - insidePercent)
+  };
+};
+
+// Generate hexagonal grid points covering a bounding box
+// Hex grids provide ~15% better coverage than square grids due to optimal circle packing
+export const generateHexGrid = (
+  bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number },
+  spacingMiles: number,
+  centerLat: number // for longitude conversion
+): Array<{ lat: number; lng: number }> => {
+  const points: Array<{ lat: number; lng: number }> = [];
+
+  // Convert spacing to degrees
+  const latStep = spacingMiles / 69;
+  const lngStep = spacingMiles / (69 * Math.cos(centerLat * Math.PI / 180));
+
+  // Hex grid uses staggered rows - row offset is spacing * sin(60°) ≈ 0.866
+  const rowHeight = latStep * 0.866;
+  const colOffset = lngStep / 2;
+
+  let rowIndex = 0;
+  for (let lat = bounds.minLat; lat <= bounds.maxLat; lat += rowHeight) {
+    // Alternate rows get horizontal offset for hex pattern
+    const xOffset = (rowIndex % 2 === 1) ? colOffset : 0;
+
+    for (let lng = bounds.minLng + xOffset; lng <= bounds.maxLng; lng += lngStep) {
+      points.push({ lat, lng });
+    }
+    rowIndex++;
+  }
+
+  return points;
+};
+
+// Calculate optimal radius for coverage-first circle packing
+// Uses the formula: radius = sqrt(area / (num_points * π * overlap_factor))
+// Then scales up to ensure overlap for continuous coverage
+export const calculateOptimalRadius = (
+  polygonAreaSqMi: number,
+  maxPoints: number,
+  overlapFactor: number = 1.5, // 1.5 = ~50% overlap between adjacent circles
+  metroType: string = 'suburban'
+): number => {
+  // Base calculation: how big should each circle be to cover the area?
+  // With overlap factor, we need circles that are larger than pure tiling
+  const baseRadius = Math.sqrt(polygonAreaSqMi / (maxPoints * Math.PI * overlapFactor));
+
+  // Scale based on metro type and practical FB targeting limits
+  let scaledRadius: number;
+  const metro = metroType.toLowerCase();
+
+  if (metro === 'urban') {
+    // Urban: smaller territories, use 2-4mi circles
+    scaledRadius = Math.max(2, Math.min(4, baseRadius * 1.5));
+  } else if (metro === 'rural') {
+    // Rural: larger territories, use 4-8mi circles
+    scaledRadius = Math.max(4, Math.min(8, baseRadius * 1.8));
+  } else {
+    // Suburban (default): use 3-6mi circles
+    scaledRadius = Math.max(3, Math.min(6, baseRadius * 1.6));
+  }
+
+  return Math.round(scaledRadius);
+};
+
+// Calculate polygon area using shoelace formula (returns sq miles)
+export const calculatePolygonArea = (coords: number[][]): number => {
+  if (coords.length < 3) return 0;
+
+  // Get centroid for latitude scaling
+  const centroidLat = coords.reduce((sum, c) => sum + c[1], 0) / coords.length;
+  const lngScale = Math.cos(centroidLat * Math.PI / 180);
+
+  // Convert to miles and calculate area using shoelace
+  let area = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const x1 = coords[i][0] * lngScale * 69;
+    const y1 = coords[i][1] * 69;
+    const x2 = coords[i + 1][0] * lngScale * 69;
+    const y2 = coords[i + 1][1] * 69;
+    area += (x1 * y2 - x2 * y1);
+  }
+
+  return Math.abs(area / 2);
+};
+
+// Score a grid point by its coverage contribution
+// Higher scores for interior points, lower for edge points
+export const scoreCoveragePoint = (
+  testLat: number,
+  testLng: number,
+  polygonCoords: number[][],
+  allPolygonRings: number[][][],
+  clinicLat: number,
+  clinicLng: number
+): { score: number; distToEdge: number; distToClinic: number } => {
+  // Find minimum distance to any polygon edge
+  let distToEdge = Infinity;
+  for (const ring of allPolygonRings) {
+    const ringDist = getDistanceToPolygonEdge(testLat, testLng, ring);
+    if (ringDist < distToEdge) distToEdge = ringDist;
+  }
+
+  const distToClinic = calculateDistance(clinicLat, clinicLng, testLat, testLng);
+
+  // Score formula: prioritize interior points but ensure edge coverage
+  // Interior (>3mi from edge): high score
+  // Mid-zone (1-3mi from edge): medium score
+  // Edge (<1mi from edge): lower score but still valued for coverage
+  let score: number;
+  if (distToEdge >= 3) {
+    score = 100 + distToEdge; // Interior gets highest scores
+  } else if (distToEdge >= 1) {
+    score = 50 + distToEdge * 10; // Mid-zone
+  } else {
+    score = 20 + distToEdge * 20; // Edge points still contribute
+  }
+
+  // Slight penalty for being too close to clinic (already covered)
+  if (distToClinic < 2) {
+    score *= 0.5;
+  }
+
+  return { score, distToEdge, distToClinic };
+};
+
+// Calculate total coverage metrics for a set of circles against a polygon
+export const calculateCoverageMetrics = (
+  circles: Array<{ lat: number; lng: number; radius: number }>,
+  coords: number[][],
+  gridResolution: number = 0.5 // miles
+): {
+  polygonArea: number; // approximate sq miles
+  circlesCoverage: number; // sq miles inside polygon
+  overspill: number; // sq miles outside polygon
+  coveragePercent: number;
+  overspillPercent: number;
+} => {
+  // Calculate polygon bounding box
+  const lats = coords.map(c => c[1]);
+  const lngs = coords.map(c => c[0]);
+  const minLat = Math.min(...lats);
+  const maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs);
+  const maxLng = Math.max(...lngs);
+
+  const centerLat = (minLat + maxLat) / 2;
+  const latStep = gridResolution / 69;
+  const lngStep = gridResolution / (69 * Math.cos(centerLat * Math.PI / 180));
+
+  let polygonPoints = 0;
+  let coveredInsidePoints = 0;
+  let coveredOutsidePoints = 0;
+
+  // Grid sampling
+  for (let lat = minLat; lat <= maxLat; lat += latStep) {
+    for (let lng = minLng; lng <= maxLng; lng += lngStep) {
+      const inPolygon = isPointInPolygon([lng, lat], coords as [number, number][]);
+
+      if (inPolygon) {
+        polygonPoints++;
+      }
+
+      // Check if covered by any circle
+      let covered = false;
+      for (const circle of circles) {
+        const dist = calculateDistance(lat, lng, circle.lat, circle.lng);
+        if (dist <= circle.radius) {
+          covered = true;
+          break;
+        }
+      }
+
+      if (covered) {
+        if (inPolygon) {
+          coveredInsidePoints++;
+        } else {
+          coveredOutsidePoints++;
+        }
+      }
+    }
+  }
+
+  const cellArea = gridResolution * gridResolution;
+  const polygonArea = polygonPoints * cellArea;
+  const circlesCoverage = coveredInsidePoints * cellArea;
+  const overspill = coveredOutsidePoints * cellArea;
+
+  return {
+    polygonArea: Math.round(polygonArea * 10) / 10,
+    circlesCoverage: Math.round(circlesCoverage * 10) / 10,
+    overspill: Math.round(overspill * 10) / 10,
+    coveragePercent: polygonPoints > 0 ? Math.round((coveredInsidePoints / polygonPoints) * 100) : 0,
+    overspillPercent: (coveredInsidePoints + coveredOutsidePoints) > 0
+      ? Math.round((coveredOutsidePoints / (coveredInsidePoints + coveredOutsidePoints)) * 100)
+      : 0
+  };
+};

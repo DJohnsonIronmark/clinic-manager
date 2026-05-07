@@ -1,0 +1,717 @@
+{
+  "name": "Saved Audiences Bootstrap",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "boolean": [
+            {
+              "name": "dry_run",
+              "value": true
+            }
+          ],
+          "string": [
+            {
+              "name": "supabase_url",
+              "value": "https://xhyttombqrhqvnycyzlj.supabase.co"
+            },
+            {
+              "name": "graph_api",
+              "value": "https://graph.facebook.com/v24.0"
+            },
+            {
+              "name": "acct_1",
+              "value": "act_10201019819851931"
+            },
+            {
+              "name": "acct_2",
+              "value": "act_708812601077037"
+            },
+            {
+              "name": "acct_3",
+              "value": "act_293603336988341"
+            },
+            {
+              "name": "acct_4",
+              "value": "act_3684421665103341"
+            },
+            {
+              "name": "acct_5",
+              "value": "act_249137098153238"
+            },
+            {
+              "name": "acct_6",
+              "value": "act_1738224836936889"
+            },
+            {
+              "name": "acct_7",
+              "value": "act_1093083055897528"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-config",
+      "name": "Config (toggle dry_run)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        460,
+        400
+      ],
+      "notes": "Set dry_run=false to actually persist creates and Supabase updates."
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config (toggle dry_run)').first().json.supabase_url }}/rest/v1/clinic_territories",
+        "authentication": "predefinedCredentialType",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "select",
+              "value": "clinic_id,clinic_name,state,fb_geo_locations,fb_saved_audience_ids"
+            },
+            {
+              "name": "fb_geo_locations",
+              "value": "not.is.null"
+            }
+          ]
+        },
+        "options": {},
+        "nodeCredentialType": "supabaseApi"
+      },
+      "id": "fetch-clinics",
+      "name": "Fetch Clinics with Targeting",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        400
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "9wxMVkfSJBYoL43Q",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enrich each clinic with the 2-letter state code and the audience name we'll use.\n// Robust to both response shapes: HTTP Request returns one item with .json=array,\n// or n8n native parses each row into its own item.\nconst NAME_TO_CODE = {\n  Alabama:'AL', Alaska:'AK', Arizona:'AZ', Arkansas:'AR', California:'CA', Colorado:'CO',\n  Connecticut:'CT', Delaware:'DE', 'District of Columbia':'DC', Florida:'FL', Georgia:'GA',\n  Hawaii:'HI', Idaho:'ID', Illinois:'IL', Indiana:'IN', Iowa:'IA', Kansas:'KS', Kentucky:'KY',\n  Louisiana:'LA', Maine:'ME', Maryland:'MD', Massachusetts:'MA', Michigan:'MI', Minnesota:'MN',\n  Mississippi:'MS', Missouri:'MO', Montana:'MT', Nebraska:'NE', Nevada:'NV',\n  'New Hampshire':'NH', 'New Jersey':'NJ', 'New Mexico':'NM', 'New York':'NY',\n  'North Carolina':'NC', 'North Dakota':'ND', Ohio:'OH', Oklahoma:'OK', Oregon:'OR',\n  Pennsylvania:'PA', 'Rhode Island':'RI', 'South Carolina':'SC', 'South Dakota':'SD',\n  Tennessee:'TN', Texas:'TX', Utah:'UT', Vermont:'VT', Virginia:'VA', Washington:'WA',\n  'West Virginia':'WV', Wisconsin:'WI', Wyoming:'WY'\n};\n\nconst items = $input.all();\nlet rows = [];\nif (items.length === 1 && Array.isArray(items[0].json)) {\n  rows = items[0].json;\n} else if (items.length === 1 && Array.isArray(items[0].json?.data)) {\n  rows = items[0].json.data;\n} else {\n  rows = items.map(i => i.json);\n}\n\nconst cfg = $('Config (toggle dry_run)').first().json;\nconst out = [];\nfor (const r of rows) {\n  if (!r || !r.clinic_id) continue;\n  const code = (r.state && r.state.length === 2) ? r.state.toUpperCase() : (NAME_TO_CODE[r.state] || r.state || '');\n  out.push({ json: {\n    clinic_id: r.clinic_id,\n    clinic_name: r.clinic_name,\n    state_code: code,\n    audience_name: `${r.clinic_name} (${code})`,\n    fb_geo_locations: r.fb_geo_locations,\n    existing_ids: r.fb_saved_audience_ids || {},\n    dry_run: cfg.dry_run,\n    supabase_url: cfg.supabase_url,\n    graph_api: cfg.graph_api,\n    acct_1: cfg.acct_1, acct_2: cfg.acct_2, acct_3: cfg.acct_3,\n    acct_4: cfg.acct_4, acct_5: cfg.acct_5, acct_6: cfg.acct_6, acct_7: cfg.acct_7\n  }});\n}\nreturn out;\n"
+      },
+      "id": "prepare-clinics",
+      "name": "Prepare Clinics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop-clinics",
+      "name": "Loop Over Clinics",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1120,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// For each of the 7 ad accounts, decide: skip (no active campaigns) | matched (existing audience) | needs_create\n// Reads pre-fetched cache from Aggregate Cache (1 HTTP call per endpoint per account, not per-clinic)\n// Only ACTIVE campaigns count — paused/archived/deleted historical campaigns don't trigger a create.\nconst clinic = $('Loop Over Clinics').item.json;\nconst cache = $('Aggregate Cache').first().json;\nconst targetName = clinic.audience_name;\nconst clinicNameLc = clinic.clinic_name.toLowerCase();\n\nfunction findMatch(list) {\n  return list.find(x => x.name === targetName)\n      || list.find(x => x.name && x.name.toLowerCase().includes(clinicNameLc));\n}\n\nfunction findActiveCampaigns(list) {\n  return list.filter(x => x.name && x.name.toLowerCase().includes(clinicNameLc) && x.status === 'ACTIVE');\n}\n\nfunction decide(accountId, savedAudiences, activeCamps) {\n  if (!activeCamps.length) return { account_id: accountId, action: 'skip_no_active_campaigns' };\n  const match = findMatch(savedAudiences);\n  if (match) return { account_id: accountId, action: 'matched', saved_audience_id: match.id, saved_audience_name: match.name };\n  return { account_id: accountId, action: 'needs_create', active_campaign_count: activeCamps.length };\n}\n\nconst per_account = [];\nfor (let i = 1; i <= 7; i++) {\n  const accountId = clinic[`acct_${i}`];\n  if (!accountId) continue;\n  const sa = cache.saved_audiences[accountId] || [];\n  const allCamps = cache.campaigns[accountId] || [];\n  const activeCamps = findActiveCampaigns(allCamps);\n  per_account.push(decide(accountId, sa, activeCamps));\n}\n\nreturn [{ json: { ...clinic, per_account } }];\n"
+      },
+      "id": "decide",
+      "name": "Decide Per Account",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Emit one item per account that needs_create (skip dry_run skip_no_campaigns matched)\nconst input = $input.first().json;\nconst out = [];\nfor (const acc of input.per_account) {\n  if (acc.action !== 'needs_create') continue;\n  if (input.dry_run) {\n    out.push({ json: { ...input, target_account: acc.account_id, will_create: true, skipped_due_to_dry_run: true } });\n    continue;\n  }\n  out.push({ json: { ...input, target_account: acc.account_id } });\n}\nreturn out.length ? out : [];"
+      },
+      "id": "fanout-create",
+      "name": "Fan-out for Create",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.dry_run }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-create",
+      "name": "If Persisting (not dry_run)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.graph_api }}/{{ $json.target_account }}/saved_audiences",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "name",
+              "value": "={{ $json.audience_name }}"
+            },
+            {
+              "name": "description",
+              "value": "Auto-generated by clinic-manager. Drive-time territory + neighbor-clinic exclusion donut. Advantage+ audience expansion disabled."
+            },
+            {
+              "name": "targeting",
+              "value": "={{ JSON.stringify({ geo_locations: $json.fb_geo_locations.geo_locations, excluded_geo_locations: $json.fb_geo_locations.excluded_geo_locations, age_min: 25, age_max: 65, targeting_optimization: 'none', targeting_relaxation_types: { lookalike: 0, custom_audience: 0 } }) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "create-sa",
+      "name": "Create Saved Audience",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2440,
+        320
+      ],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      },
+      "notes": "Creates a saved audience with no Advantage+ audience expansion (targeting_relaxation_types zeroed)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tag the created result back onto the per-clinic per-account record\nconst created = $input.first().json;\nconst src = $('Fan-out for Create').item.json;\nreturn [{ json: { ...src, created_saved_audience_id: created.id || null, created_response: created } }];"
+      },
+      "id": "tag-created",
+      "name": "Tag Created",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// After looping, aggregate per-clinic ids: combine matched + created.\n// Items entering this node could be: from Decide (already matched) or from Tag Created (newly created)\nconst all = $input.all();\nconst byClinic = {};\nfor (const item of all) {\n  const j = item.json;\n  const cid = j.clinic_id;\n  if (!byClinic[cid]) {\n    byClinic[cid] = {\n      clinic_id: cid,\n      clinic_name: j.clinic_name,\n      audience_name: j.audience_name,\n      ids: { ...(j.existing_ids || {}) },\n      events: []\n    };\n  }\n  // matched audiences come from per_account scan\n  if (j.per_account) {\n    for (const acc of j.per_account) {\n      if (acc.action === 'matched') {\n        byClinic[cid].ids[acc.account_id] = acc.saved_audience_id;\n        byClinic[cid].events.push({ account: acc.account_id, action: 'matched', saved_audience_id: acc.saved_audience_id, name: acc.saved_audience_name });\n      } else if (acc.action === 'skip_no_active_campaigns') {\n        byClinic[cid].events.push({ account: acc.account_id, action: 'skip_no_active_campaigns' });\n      }\n    }\n  }\n  // newly created audience\n  if (j.created_saved_audience_id) {\n    byClinic[cid].ids[j.target_account] = j.created_saved_audience_id;\n    byClinic[cid].events.push({ account: j.target_account, action: 'created', saved_audience_id: j.created_saved_audience_id });\n  } else if (j.skipped_due_to_dry_run) {\n    byClinic[cid].events.push({ account: j.target_account, action: 'would_create_dry_run' });\n  }\n}\nreturn Object.values(byClinic).map(v => ({ json: v }));"
+      },
+      "id": "aggregate",
+      "name": "Aggregate Per Clinic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Config (toggle dry_run)').first().json.dry_run }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "id": "if-persist-supabase",
+      "name": "If Persist to Supabase",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        3100,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $('Config (toggle dry_run)').first().json.supabase_url }}/rest/v1/clinic_territories",
+        "authentication": "predefinedCredentialType",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "clinic_id",
+              "value": "=eq.{{ $json.clinic_id }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ fb_saved_audience_ids: $json.ids }) }}",
+        "options": {},
+        "nodeCredentialType": "supabaseApi"
+      },
+      "id": "update-supabase",
+      "name": "Update Supabase fb_saved_audience_ids",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3320,
+        320
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "9wxMVkfSJBYoL43Q",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Final report\nconst items = $input.all();\nconst summary = items.map(i => ({ clinic_id: i.json.clinic_id, clinic_name: i.json.clinic_name, audience_name: i.json.audience_name, ids: i.json.ids, events: i.json.events }));\nreturn [{ json: { dry_run: $('Config (toggle dry_run)').first().json.dry_run, total_clinics: summary.length, summary } }];"
+      },
+      "id": "report",
+      "name": "Format Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3540,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "saved-audiences-bootstrap",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "trigger-webhook",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        240,
+        200
+      ],
+      "webhookId": "saved-audiences-bootstrap"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Emit one item per ad account so HTTP nodes can iterate per-item\nconst cfg = $('Config (toggle dry_run)').first().json;\nconst out = [];\nfor (let i = 1; i <= 7; i++) {\n  const id = cfg[`acct_${i}`];\n  if (id) out.push({ json: { account_id: id, account_index: i, graph_api: cfg.graph_api } });\n}\nreturn out;\n"
+      },
+      "id": "emit-per-account",
+      "name": "Emit Per Account",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Emit Per Account').item.json.graph_api }}/{{ $('Emit Per Account').item.json.account_id }}/saved_audiences",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,name"
+            },
+            {
+              "name": "limit",
+              "value": "200"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.cursors ? $response.body.paging.cursors.after : '' }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body || !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 200
+            }
+          }
+        }
+      },
+      "id": "list-sa-all",
+      "name": "List Saved Audiences (All Accounts)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        200
+      ],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Emit Per Account').item.json.graph_api }}/{{ $('Emit Per Account').item.json.account_id }}/campaigns",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,name,status"
+            },
+            {
+              "name": "limit",
+              "value": "200"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "after",
+                    "value": "={{ $response.body.paging && $response.body.paging.cursors ? $response.body.paging.cursors.after : '' }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body || !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 200
+            }
+          }
+        }
+      },
+      "id": "list-camps-all",
+      "name": "List Campaigns (All Accounts)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1120,
+        200
+      ],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate per-account responses into a single cache: { saved_audiences: {acct: [...]}, campaigns: {acct: [...]} }\n// HTTP nodes paginate: each page becomes its own output item. Use pairedItem to map\n// each page back to its source account_id from Emit Per Account.\nconst emit = $('Emit Per Account').all();\nconst saItems = $('List Saved Audiences (All Accounts)').all();\nconst campsItems = $('List Campaigns (All Accounts)').all();\n\nfunction extractData(item) {\n  const j = item.json;\n  if (Array.isArray(j)) return j;\n  if (Array.isArray(j.data)) return j.data;\n  if (Array.isArray(j.body?.data)) return j.body.data;\n  return [];\n}\n\nfunction sourceIndex(item) {\n  // pairedItem may be a number, an object with .item, or an array of objects\n  const p = item.pairedItem;\n  if (typeof p === 'number') return p;\n  if (Array.isArray(p) && p.length) return p[0].item ?? 0;\n  if (p && typeof p === 'object') return p.item ?? 0;\n  return 0;\n}\n\nconst cache = { saved_audiences: {}, campaigns: {} };\nfor (const a of emit) {\n  cache.saved_audiences[a.json.account_id] = [];\n  cache.campaigns[a.json.account_id] = [];\n}\n\nfor (const item of saItems) {\n  const idx = sourceIndex(item);\n  const acct = emit[idx]?.json.account_id;\n  if (!acct) continue;\n  cache.saved_audiences[acct].push(...extractData(item));\n}\n\nfor (const item of campsItems) {\n  const idx = sourceIndex(item);\n  const acct = emit[idx]?.json.account_id;\n  if (!acct) continue;\n  cache.campaigns[acct].push(...extractData(item));\n}\n\nconst counts = {};\nfor (const a of emit) {\n  const acct = a.json.account_id;\n  counts[acct] = {\n    saved_audiences: cache.saved_audiences[acct].length,\n    campaigns: cache.campaigns[acct].length\n  };\n}\n\nreturn [{ json: { ...cache, _counts: counts } }];\n"
+      },
+      "id": "aggregate-cache",
+      "name": "Aggregate Cache",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config (toggle dry_run)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config (toggle dry_run)": {
+      "main": [
+        [
+          {
+            "node": "Emit Per Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Clinics with Targeting": {
+      "main": [
+        [
+          {
+            "node": "Prepare Clinics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Clinics": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Clinics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Clinics": {
+      "main": [
+        [
+          {
+            "node": "If Persist to Supabase",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Decide Per Account",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Per Account": {
+      "main": [
+        [
+          {
+            "node": "Fan-out for Create",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Aggregate Per Clinic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fan-out for Create": {
+      "main": [
+        [
+          {
+            "node": "If Persisting (not dry_run)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Persisting (not dry_run)": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Per Clinic",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Saved Audience",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Saved Audience": {
+      "main": [
+        [
+          {
+            "node": "Tag Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag Created": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Per Clinic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Per Clinic": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Clinics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Persist to Supabase": {
+      "main": [
+        [
+          {
+            "node": "Update Supabase fb_saved_audience_ids",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Supabase fb_saved_audience_ids": {
+      "main": [
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config (toggle dry_run)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Emit Per Account": {
+      "main": [
+        [
+          {
+            "node": "List Saved Audiences (All Accounts)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Saved Audiences (All Accounts)": {
+      "main": [
+        [
+          {
+            "node": "List Campaigns (All Accounts)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Campaigns (All Accounts)": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Cache",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Cache": {
+      "main": [
+        [
+          {
+            "node": "Fetch Clinics with Targeting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

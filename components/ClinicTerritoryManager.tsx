@@ -7,7 +7,23 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 
 import Link from 'next/link';
-import { generateColor, calculateDistance, isPointInPolygon, estimateDriveTime, selectRadii, parseJSON } from '@/lib/geo-utils';
+import {
+  generateColor,
+  calculateDistance,
+  isPointInPolygon,
+  estimateDriveTime,
+  selectRadii,
+  parseJSON,
+  getDistanceToPolygonEdge,
+  getMaxSafeRadius,
+  samplePolygonPerimeter,
+  estimateCircleCoverage,
+  calculateCoverageMetrics,
+  generateHexGrid,
+  calculateOptimalRadius,
+  calculatePolygonArea,
+  scoreCoveragePoint
+} from '@/lib/geo-utils';
 import type { Clinic, OverlapAnalysis, GeoJSONFeature, GeoJSONFeatureCollection, GeoJSONGeometry, AgeTargetingData } from '@/lib/types';
 import ageTargetingData from '@/data/age-targeting.json';
 import AIInsightsPanel from './AIInsightsPanel';
@@ -86,6 +102,16 @@ export default function ClinicTerritoryManager() {
   const [showChurnRisk, setShowChurnRisk] = useState(false);
   const [newLocationForm, setNewLocationForm] = useState({ clinic_name: '', clinic_id: '', address: '' });
   const [addingLocation, setAddingLocation] = useState(false);
+  const [pushTargetingStatus, setPushTargetingStatus] = useState<'idle' | 'confirming' | 'pushing' | 'done'>('idle');
+  const [pushTargetingResult, setPushTargetingResult] = useState<{
+    success: boolean;
+    summary?: { updated: number; skipped: number; errors: number };
+    results?: Array<{ clinic_id: string; clinic_name: string; status: string; reason?: string; adsets_updated?: number }>;
+    skipped_no_targeting?: string[];
+    error?: string;
+  } | null>(null);
+  const [pushTargetingMode, setPushTargetingMode] = useState<'single' | 'batch' | 'all'>('single');
+  const [selectedClinicIds, setSelectedClinicIds] = useState<Set<string>>(new Set());
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const editChatRef = useRef<HTMLDivElement>(null);
@@ -241,6 +267,20 @@ export default function ClinicTerritoryManager() {
   const loadBoundaries = useCallback(async (clinicsData: Clinic[]) => {
     if (!map.current) return;
 
+    // Wait for clinic-points layer to exist before adding boundaries
+    // This fixes the race condition where boundaries could render on top of points
+    const waitForPointsLayer = async (): Promise<void> => {
+      for (let i = 0; i < 50; i++) { // Max 5 seconds wait
+        if (map.current?.getLayer('clinic-points')) {
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      console.warn('clinic-points layer not found after timeout, proceeding anyway');
+    };
+
+    await waitForPointsLayer();
+
     const batchSize = 25;
     let offset = 0;
     let allBoundaryFeatures: GeoJSON.Feature[] = [];
@@ -252,6 +292,9 @@ export default function ClinicTerritoryManager() {
         data: { type: 'FeatureCollection', features: [] }
       });
 
+      // Determine beforeId - use clinic-points if it exists, otherwise undefined
+      const beforeId = map.current.getLayer('clinic-points') ? 'clinic-points' : undefined;
+
       map.current.addLayer({
         id: 'clinic-boundaries-fill',
         type: 'fill',
@@ -260,7 +303,7 @@ export default function ClinicTerritoryManager() {
           'fill-color': ['get', 'color'],
           'fill-opacity': 0.4
         }
-      }, 'clinic-points'); // Insert below points
+      }, beforeId); // Insert below points
 
       map.current.addLayer({
         id: 'clinic-boundaries-line',
@@ -271,7 +314,7 @@ export default function ClinicTerritoryManager() {
           'line-width': 2,
           'line-opacity': 0.8
         }
-      }, 'clinic-points');
+      }, beforeId);
 
       map.current.on('mouseenter', 'clinic-boundaries-fill', () => {
         map.current!.getCanvas().style.cursor = 'pointer';
@@ -335,6 +378,14 @@ export default function ClinicTerritoryManager() {
 
         // Small delay to not overwhelm the server
         await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Ensure points and labels are on top of boundaries
+      if (map.current.getLayer('clinic-points')) {
+        map.current.moveLayer('clinic-points');
+      }
+      if (map.current.getLayer('clinic-labels')) {
+        map.current.moveLayer('clinic-labels');
       }
 
       setLoadingStatus('');
@@ -846,30 +897,77 @@ User request: ${userMessage}`;
     }
   };
 
-  const getAddress = async (latitude: number, longitude: number): Promise<string | null> => {
-    try {
-      // First try to get a street address
-      const addressResponse = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}&types=address`
-      );
-      const addressData = await addressResponse.json();
-      if (addressData.features && addressData.features.length > 0) {
-        return addressData.features[0].place_name;
-      }
+  const getFacebookAddress = async (latitude: number, longitude: number): Promise<string> => {
+    const formatForFacebook = (placeName: string): string => {
+      return placeName.replace(/, United States$/, '');
+    };
 
-      // Fall back to any location type (place, locality, poi, etc.)
-      const fallbackResponse = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${longitude},${latitude}.json?access_token=${MAPBOX_TOKEN}`
+    const fetchAddress = async (lng: number, lat: number): Promise<string | null> => {
+      const resp = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json?access_token=${MAPBOX_TOKEN}&types=address&limit=1`
       );
-      const fallbackData = await fallbackResponse.json();
-      if (fallbackData.features && fallbackData.features.length > 0) {
-        return fallbackData.features[0].place_name;
+      const data = await resp.json();
+      if (data.features?.length > 0) {
+        return formatForFacebook(data.features[0].place_name);
       }
-
       return null;
+    };
+
+    try {
+      // Search for a street address in expanding rings up to 50 miles
+      // Cardinal directions first, then diagonals at each distance
+      const distances = [0, 0.5, 1, 2, 3, 5, 8, 12, 18, 25, 35, 50];
+
+      for (const dist of distances) {
+        if (dist === 0) {
+          // Exact point
+          const exact = await fetchAddress(longitude, latitude);
+          if (exact) return exact;
+          continue;
+        }
+
+        const offsetDeg = dist / 69;
+        const offsetLng = dist / (69 * Math.cos(latitude * Math.PI / 180));
+
+        // Cardinal directions (N, S, E, W)
+        const cardinals = [
+          { lat: latitude + offsetDeg, lng: longitude },
+          { lat: latitude - offsetDeg, lng: longitude },
+          { lat: latitude, lng: longitude + offsetLng },
+          { lat: latitude, lng: longitude - offsetLng },
+        ];
+
+        for (const offset of cardinals) {
+          const addr = await fetchAddress(offset.lng, offset.lat);
+          if (addr) return addr;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+
+        // Diagonal directions (NE, NW, SE, SW)
+        const diagFactor = dist * 0.707;
+        const diagLatOff = diagFactor / 69;
+        const diagLngOff = diagFactor / (69 * Math.cos(latitude * Math.PI / 180));
+
+        const diagonals = [
+          { lat: latitude + diagLatOff, lng: longitude + diagLngOff },
+          { lat: latitude + diagLatOff, lng: longitude - diagLngOff },
+          { lat: latitude - diagLatOff, lng: longitude + diagLngOff },
+          { lat: latitude - diagLatOff, lng: longitude - diagLngOff },
+        ];
+
+        for (const offset of diagonals) {
+          const addr = await fetchAddress(offset.lng, offset.lat);
+          if (addr) return addr;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
+
+      // Exhausted 50-mile search — should not happen in populated US areas
+      console.error(`No street address found within 50mi of ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`);
+      return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
     } catch (error) {
       console.error('Geocoding error:', error);
-      return null;
+      return `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
     }
   };
 
@@ -918,24 +1016,76 @@ User request: ${userMessage}`;
         firstCoordSample: JSON.stringify(Array.isArray(geometry.coordinates?.[0]) ? (geometry.coordinates[0] as unknown[]).slice(0, 2) : geometry.coordinates?.[0])
       });
 
-      // Handle different geometry types
-      let coords: number[][];
+      // Handle different geometry types - collect ALL polygon rings for MultiPolygon
+      let allPolygonRings: number[][][] = [];
+      const allPolygonHoles: number[][][] = [];
       if (geometry.type === 'Polygon') {
-        coords = (geometry.coordinates as number[][][])[0];
-      } else if (geometry.type === 'MultiPolygon') {
-        // For MultiPolygon, find the largest polygon by coordinate count
-        const polygons = geometry.coordinates as number[][][][];
-        let largestPolygon = polygons[0][0];
-        for (const polygon of polygons) {
-          if (polygon[0].length > largestPolygon.length) {
-            largestPolygon = polygon[0];
+        const polyCoords = geometry.coordinates as number[][][];
+        allPolygonRings = [polyCoords[0]];
+        if (polyCoords.length > 1) {
+          for (const hole of polyCoords.slice(1)) {
+            if (hole && hole.length > 3) allPolygonHoles.push(hole);
           }
         }
-        coords = largestPolygon;
+      } else if (geometry.type === 'MultiPolygon') {
+        // Collect ALL polygon outer rings - don't just use the largest!
+        const multiPolygons = geometry.coordinates as number[][][][];
+        for (const polygon of multiPolygons) {
+          if (polygon[0] && polygon[0].length > 3) {
+            allPolygonRings.push(polygon[0]);
+            if (polygon.length > 1) {
+              for (const hole of polygon.slice(1)) {
+                if (hole && hole.length > 3) allPolygonHoles.push(hole);
+              }
+            }
+          }
+        }
+        console.log(`MultiPolygon: Processing ${allPolygonRings.length} outer rings, ${allPolygonHoles.length} holes`);
       } else {
         console.error('Unexpected geometry type:', geometry.type);
-        coords = (geometry.coordinates as number[][][])[0] || [];
+        allPolygonRings = [(geometry.coordinates as number[][][])[0] || []];
       }
+
+      // For compatibility, use the first/largest ring as primary coords
+      // But we'll check against ALL rings for point-in-polygon tests
+      const coords = allPolygonRings.reduce((largest, ring) =>
+        ring.length > largest.length ? ring : largest, allPolygonRings[0]);
+
+      // Helper to check if point is in ANY of the polygon rings (and not in a hole)
+      const isPointInAnyPolygon = (testLng: number, testLat: number): boolean => {
+        for (const hole of allPolygonHoles) {
+          if (isPointInPolygon([testLng, testLat], hole as [number, number][])) {
+            return false;
+          }
+        }
+        for (const ring of allPolygonRings) {
+          if (isPointInPolygon([testLng, testLat], ring as [number, number][])) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      // Distance to nearest territory edge (outer rings + holes treated as edges to avoid)
+      const distanceToTerritoryEdge = (testLat: number, testLng: number): number => {
+        let dist = Infinity;
+        for (const ring of allPolygonRings) {
+          const r = getDistanceToPolygonEdge(testLat, testLng, ring);
+          if (r < dist) dist = r;
+        }
+        for (const hole of allPolygonHoles) {
+          const r = getDistanceToPolygonEdge(testLat, testLng, hole);
+          if (r < dist) dist = r;
+        }
+        return dist;
+      };
+
+      // Adaptive include radius: keep ~85% of circle inside the polygon.
+      // distToEdge * 1.15 allows a small overspill, capped at the metro-tuned optimalRadius.
+      const adaptiveIncludeRadius = (distToEdge: number, maxRadius: number): number => {
+        const target = Math.max(1, Math.min(maxRadius, Math.round(distToEdge * 1.15)));
+        return target;
+      };
 
       console.log('Coords Debug:', {
         coordsLength: coords?.length,
@@ -943,14 +1093,21 @@ User request: ${userMessage}`;
         lastCoord: coords?.[coords?.length - 1]
       });
 
-      const lats = coords.map(c => c[1]);
-      const lngs = coords.map(c => c[0]);
-      const minLat = Math.min(...lats);
-      const maxLat = Math.max(...lats);
-      const minLng = Math.min(...lngs);
-      const maxLng = Math.max(...lngs);
+      // Calculate bounding box across ALL polygon rings
+      const allLats: number[] = [];
+      const allLngs: number[] = [];
+      for (const ring of allPolygonRings) {
+        for (const coord of ring) {
+          allLngs.push(coord[0]);
+          allLats.push(coord[1]);
+        }
+      }
+      const minLat = Math.min(...allLats);
+      const maxLat = Math.max(...allLats);
+      const minLng = Math.min(...allLngs);
+      const maxLng = Math.max(...allLngs);
 
-      console.log('Bounds Debug:', { minLat, maxLat, minLng, maxLng });
+      console.log('Bounds Debug:', { minLat, maxLat, minLng, maxLng, polygonCount: allPolygonRings.length });
 
       const territoryWidth = calculateDistance(lat, minLng, lat, maxLng);
       const territoryHeight = calculateDistance(minLat, lng, maxLat, lng);
@@ -970,69 +1127,101 @@ User request: ${userMessage}`;
       setSaveStatus('generating inclusion points...');
 
       // CONSTRAINT: Facebook visual preview requires 25 points max (inclusions + exclusions)
-      // Using 4 exclusion points (corners), leaving 21 for inclusions
+      // Reserve slots for neighbor exclusions + cardinal exclusions
       const MAX_TOTAL_POINTS = 25;
-      const NUM_EXCLUSIONS = 4;
-      const MAX_INCLUSIONS = MAX_TOTAL_POINTS - NUM_EXCLUSIONS;
+      const MAX_NEIGHBOR_EXCLUSIONS = 6; // Reserve up to 6 slots for nearby clinic exclusions
+      const MAX_CARDINAL_EXCLUSIONS = 4; // 4 cardinal direction exclusions (reduced from 8)
+      const MAX_EXCLUSIONS = MAX_NEIGHBOR_EXCLUSIONS + MAX_CARDINAL_EXCLUSIONS;
+      const MAX_INCLUSIONS = MAX_TOTAL_POINTS - MAX_EXCLUSIONS; // 15 inclusions
 
-      // Grid spacing based on metro type
-      // Suburban/Rural use 5mi circles, so wider spacing; Urban uses smaller circles
       const metroLower = metroType.toLowerCase();
-      const GRID_SPACING_BASE = (metroLower === 'suburban' || metroLower === 'rural') ? 3.0 : 1.0;
 
       // Convert miles to degrees
       const milesToDegreesLat = (miles: number) => miles / 69;
       const milesToDegreesLng = (miles: number, atLat: number) => miles / (69 * Math.cos(atLat * Math.PI / 180));
 
-      // Calculate approximate distance from point to polygon boundary
-      // by checking distance to all boundary vertices
-      const getDistanceFromBoundary = (testLat: number, testLng: number): number => {
-        let minDist = Infinity;
-        for (let i = 0; i < coords.length - 1; i++) {
-          // Distance to vertex
-          const vertexDist = calculateDistance(testLat, testLng, coords[i][1], coords[i][0]);
-          if (vertexDist < minDist) minDist = vertexDist;
+      // =================================================================
+      // COVERAGE-FIRST ALGORITHM: Hexagonal grid with overlapping circles
+      // Target: >85% coverage, accept up to 25% overspill
+      // =================================================================
 
-          // Distance to edge segment (approximate using midpoint)
-          const midLat = (coords[i][1] + coords[i + 1][1]) / 2;
-          const midLng = (coords[i][0] + coords[i + 1][0]) / 2;
-          const midDist = calculateDistance(testLat, testLng, midLat, midLng);
-          if (midDist < minDist) minDist = midDist;
+      // Step 1: Calculate polygon area for optimal radius calculation
+      let totalPolygonArea = 0;
+      for (const ring of allPolygonRings) {
+        totalPolygonArea += calculatePolygonArea(ring);
+      }
+      console.log(`Polygon area: ${totalPolygonArea.toFixed(1)} sq mi`);
+
+      // Step 2: Calculate optimal radius for coverage
+      // This gives us a fixed radius that ensures overlapping circles for continuous coverage
+      const optimalRadius = calculateOptimalRadius(totalPolygonArea, MAX_INCLUSIONS, 1.5, metroType);
+      console.log(`Optimal radius for coverage: ${optimalRadius} mi`);
+
+      // Step 3: Calculate hex grid spacing for ~50% overlap between adjacent circles
+      // Spacing = radius * 1.5 gives good overlap
+      const hexSpacing = optimalRadius * 1.5;
+
+      // Step 4: Generate hexagonal grid covering the bounding box
+      const gridPoints = generateHexGrid(
+        { minLat, maxLat, minLng, maxLng },
+        hexSpacing,
+        lat
+      );
+      console.log(`Generated ${gridPoints.length} hex grid points`);
+
+      // Step 5: Filter and score grid points
+      interface ScoredPoint {
+        lat: number;
+        lng: number;
+        radius: number;
+        score: number;
+        distToEdge: number;
+        distToClinic: number;
+        isPerimeter: boolean;
+      }
+
+      const scoredPoints: ScoredPoint[] = [];
+
+      for (const point of gridPoints) {
+        // Only consider candidates strictly inside the territory polygon (and not in a hole).
+        // Boundary coverage is handled separately by perimeter gap-fillers below.
+        if (!isPointInAnyPolygon(point.lng, point.lat)) continue;
+
+        const distToEdge = distanceToTerritoryEdge(point.lat, point.lng);
+        const distToClinic = calculateDistance(lat, lng, point.lat, point.lng);
+
+        // Adaptive radius sized to the local polygon thickness so the circle hugs the shape.
+        const adaptiveRadius = adaptiveIncludeRadius(distToEdge, optimalRadius);
+
+        // Score: deep-interior points highest, near-edge slightly lower (smaller circles still useful).
+        let score: number;
+        if (distToEdge >= optimalRadius * 0.5) {
+          score = 100 + distToEdge;
+        } else {
+          score = 60 + distToEdge * 5;
         }
-        return minDist;
-      };
 
-      // Determine appropriate radius based on metro type and distance from center
-      const getRadiusForPoint = (distFromCenter: number, maxDist: number): number => {
-        const metroLower = metroType.toLowerCase();
-
-        // Suburban and Rural: use 5mi radius for all points (better coverage)
-        if (metroLower === 'suburban' || metroLower === 'rural') {
-          return 5;
+        // Penalty for being too close to clinic pin (already covered by clinic include circle).
+        if (distToClinic < optimalRadius * 0.5) {
+          score *= 0.3;
         }
 
-        // Urban: use smaller radii based on distance from center
-        const pctFromCenter = distFromCenter / maxDist;
-        if (pctFromCenter <= 0.4) return 3;  // Core zone: 3mi
-        if (pctFromCenter <= 0.7) return 2;  // Mid zone: 2mi
-        return 1;  // Edge zone: 1mi for precision
-      };
+        scoredPoints.push({
+          lat: point.lat,
+          lng: point.lng,
+          radius: adaptiveRadius,
+          score,
+          distToEdge,
+          distToClinic,
+          isPerimeter: distToEdge < optimalRadius * 0.3
+        });
+      }
 
-      // Check if a circle at (lat, lng) with given radius is mostly inside the polygon
-      const isCircleMostlyInside = (centerLat: number, centerLng: number, radiusMiles: number): boolean => {
-        // Check 8 points around the circle perimeter
-        const checkPoints = 8;
-        let insideCount = 0;
-        for (let i = 0; i < checkPoints; i++) {
-          const angle = (i / checkPoints) * 2 * Math.PI;
-          const checkLat = centerLat + milesToDegreesLat(radiusMiles) * Math.sin(angle);
-          const checkLng = centerLng + milesToDegreesLng(radiusMiles, centerLat) * Math.cos(angle);
-          if (isPointInPolygon([checkLng, checkLat], coords as [number, number][])) {
-            insideCount++;
-          }
-        }
-        return insideCount >= checkPoints * 0.6; // At least 60% inside
-      };
+      console.log(`Scored ${scoredPoints.length} candidate points`);
+
+      // Step 6: Select top N points with spatial distribution
+      // Sort by score (highest first)
+      scoredPoints.sort((a, b) => b.score - a.score);
 
       interface InclusionPoint {
         lat: number;
@@ -1042,145 +1231,104 @@ User request: ${userMessage}`;
         distFromBoundary: number;
       }
 
-      const inclusionPoints: InclusionPoint[] = [];
+      const selectedPoints: InclusionPoint[] = [];
 
-      // Calculate max distance from clinic to any boundary point for radius scaling
-      let maxDistFromClinic = 0;
-      for (const coord of coords) {
-        const dist = calculateDistance(lat, lng, coord[1], coord[0]);
-        if (dist > maxDistFromClinic) maxDistFromClinic = dist;
-      }
-      // Ensure minimum to avoid division issues
-      maxDistFromClinic = Math.max(maxDistFromClinic, 5);
-
-      // Always add clinic location first with 5mi radius (center of territory)
-      const clinicDistFromBoundary = getDistanceFromBoundary(lat, lng);
-      inclusionPoints.push({
+      // Always add the clinic pin first; size by local polygon thickness so it hugs the shape.
+      const clinicDistToEdge = distanceToTerritoryEdge(lat, lng);
+      selectedPoints.push({
         lat: lat,
         lng: lng,
-        radius: 5, // Clinic is always at center, use max radius
+        radius: adaptiveIncludeRadius(clinicDistToEdge, optimalRadius),
         distFromCenter: 0,
-        distFromBoundary: clinicDistFromBoundary
+        distFromBoundary: clinicDistToEdge
       });
 
-      // Generate candidate points on a grid covering the polygon
-      const fineGridSpacing = GRID_SPACING_BASE;
-      const latStep = milesToDegreesLat(fineGridSpacing);
-      const lngStep = milesToDegreesLng(fineGridSpacing, lat);
-      const hexOffset = lngStep / 2;
-
-      const candidatePoints: InclusionPoint[] = [];
-
-      let rowIndex = 0;
-      for (let testLat = minLat; testLat <= maxLat; testLat += latStep) {
-        const rowOffset = (rowIndex % 2 === 1) ? hexOffset : 0;
-
-        for (let testLng = minLng + rowOffset; testLng <= maxLng; testLng += lngStep) {
-          const distFromClinic = calculateDistance(lat, lng, testLat, testLng);
-          if (distFromClinic < fineGridSpacing * 0.3) continue; // Skip very near clinic
-
-          if (isPointInPolygon([testLng, testLat], coords as [number, number][])) {
-            const distFromBoundary = getDistanceFromBoundary(testLat, testLng);
-            // Use distance from clinic center for radius (works better with complex isochrones)
-            const radius = getRadiusForPoint(distFromClinic, maxDistFromClinic);
-
-            candidatePoints.push({
-              lat: testLat,
-              lng: testLng,
-              radius,
-              distFromCenter: distFromClinic,
-              distFromBoundary
-            });
-          }
-        }
-        rowIndex++;
-      }
-
-      // Simple approach: distribute points spatially
-      // 1. Sort by distance from clinic (spread outward from center)
-      // 2. Select points that are well-spaced from already-selected points
-      candidatePoints.sort((a, b) => a.distFromCenter - b.distFromCenter);
-
-      const selectedPoints: InclusionPoint[] = [];
-      // Minimum spacing between circle centers - wider for suburban/rural with 5mi circles
-      const minSpacing = (metroLower === 'suburban' || metroLower === 'rural') ? 4.0 : 1.2;
-
-      const isTooClose = (testLat: number, testLng: number): boolean => {
+      // Spacing scales with the larger of the two circles, so small boundary circles can pack
+      // tightly without redundant overlap among large interior circles.
+      const isTooClose = (testLat: number, testLng: number, testRadius: number): boolean => {
         for (const selected of selectedPoints) {
           const dist = calculateDistance(testLat, testLng, selected.lat, selected.lng);
-          // Allow circles to overlap somewhat - just avoid putting centers too close
-          if (dist < minSpacing) return true;
+          const minSep = Math.max(selected.radius, testRadius) * 0.7;
+          if (dist < minSep) return true;
         }
-        // Check against clinic location - use smaller spacing near clinic
-        const distFromClinic = calculateDistance(testLat, testLng, lat, lng);
-        if (distFromClinic < minSpacing) return true;
         return false;
       };
 
-      // Select spatially distributed points
-      for (const candidate of candidatePoints) {
-        if (selectedPoints.length >= MAX_INCLUSIONS - 1) break; // -1 for clinic
+      // Select points, prioritizing by score
+      for (const candidate of scoredPoints) {
+        if (selectedPoints.length >= MAX_INCLUSIONS) break;
 
-        if (isTooClose(candidate.lat, candidate.lng)) continue;
-
-        // For larger circles, verify they fit inside the polygon
-        // But be more lenient for points near the clinic center (core zone)
-        let finalRadius = candidate.radius;
-        const pctFromCenter = candidate.distFromCenter / maxDistFromClinic;
-
-        if (finalRadius >= 3) {
-          // Core zone (0-40%): trust the radius, don't downgrade
-          if (pctFromCenter > 0.4) {
-            // Mid/edge zone: check if circle fits
-            if (!isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
-              finalRadius = finalRadius === 5 ? 3 : 1;
-              if (finalRadius >= 3 && !isCircleMostlyInside(candidate.lat, candidate.lng, finalRadius)) {
-                finalRadius = 1;
-              }
-            }
-          }
+        if (!isTooClose(candidate.lat, candidate.lng, candidate.radius)) {
+          selectedPoints.push({
+            lat: candidate.lat,
+            lng: candidate.lng,
+            radius: candidate.radius,
+            distFromCenter: candidate.distToClinic,
+            distFromBoundary: candidate.distToEdge
+          });
         }
-        candidate.radius = finalRadius;
-
-        selectedPoints.push(candidate);
       }
 
-      // Now prioritize edge points - add any near-boundary points we missed
-      const edgeCandidates = candidatePoints
-        .filter(p => p.distFromBoundary < 2.5)
-        .filter(p => !selectedPoints.some(s =>
-          calculateDistance(p.lat, p.lng, s.lat, s.lng) < 1.0
-        ))
-        .sort((a, b) => a.distFromBoundary - b.distFromBoundary);
+      // Step 7: Add perimeter gap-fillers with adaptive radii if we have slots left.
+      // These hug the boundary so thin extensions of the polygon get small (1-2mi) circles
+      // instead of larger circles that bulge outside the shape.
+      if (selectedPoints.length < MAX_INCLUSIONS) {
+        const perimeterGapFillers: Array<{ lat: number; lng: number }> = [];
+        const pointsPerRing = Math.max(4, Math.floor(20 / allPolygonRings.length));
 
-      for (const edge of edgeCandidates) {
-        if (selectedPoints.length >= MAX_INCLUSIONS - 1) break;
-        edge.radius = 1; // Force 1mi for edge points
-        selectedPoints.push(edge);
+        // Offset inward by ~1 mi so the sample points are inside the polygon.
+        const perimeterInset = Math.max(0.5, Math.min(1.5, optimalRadius * 0.4));
+        for (const ring of allPolygonRings) {
+          const ringPoints = samplePolygonPerimeter(ring, pointsPerRing, perimeterInset);
+          perimeterGapFillers.push(...ringPoints);
+        }
+
+        // Cap perimeter circles smaller than interior hex circles to limit overspill.
+        const perimeterMaxRadius = Math.max(1, Math.min(3, Math.round(optimalRadius * 0.6)));
+
+        for (const perimPt of perimeterGapFillers) {
+          if (selectedPoints.length >= MAX_INCLUSIONS) break;
+
+          if (!isPointInAnyPolygon(perimPt.lng, perimPt.lat)) continue;
+
+          const distToEdge = distanceToTerritoryEdge(perimPt.lat, perimPt.lng);
+          const perimRadius = adaptiveIncludeRadius(distToEdge, perimeterMaxRadius);
+
+          if (isTooClose(perimPt.lat, perimPt.lng, perimRadius)) continue;
+
+          selectedPoints.push({
+            lat: perimPt.lat,
+            lng: perimPt.lng,
+            radius: perimRadius,
+            distFromCenter: calculateDistance(lat, lng, perimPt.lat, perimPt.lng),
+            distFromBoundary: distToEdge
+          });
+        }
       }
 
-      // Combine clinic + selected points
-      const distributedInclusions: InclusionPoint[] = [
-        inclusionPoints[0], // Clinic location
-        ...selectedPoints
-      ];
+      // Combine all selected points
+      const distributedInclusions = selectedPoints;
 
       // Debug logging
-      console.log('FB Targeting Debug:', {
+      console.log('FB Targeting Debug (Coverage-First Algorithm):', {
         territorySize: `${territoryWidth.toFixed(1)} x ${territoryHeight.toFixed(1)} miles`,
-        maxDistFromClinic: `${maxDistFromClinic.toFixed(1)} miles`,
-        totalCandidates: candidatePoints.length,
-        selectedPoints: selectedPoints.length,
-        edgeCandidatesCount: edgeCandidates.length,
+        polygonArea: `${totalPolygonArea.toFixed(1)} sq mi`,
+        optimalRadius: `${optimalRadius} mi`,
+        hexSpacing: `${hexSpacing.toFixed(1)} mi`,
+        gridPointsGenerated: gridPoints.length,
+        scoredCandidates: scoredPoints.length,
         finalInclusions: distributedInclusions.length,
+        algorithm: 'Coverage-first hex grid with overlapping circles',
+        targetCoverage: '>85%',
+        acceptableOverspill: '<25%',
         radiusBreakdown: distributedInclusions.reduce((acc, p) => {
           acc[p.radius] = (acc[p.radius] || 0) + 1;
           return acc;
         }, {} as Record<number, number>)
       });
 
-      // For exclusion calculation - use max inclusion radius (5mi)
-      const actualMaxInclusionRadius = 5;
+      // For exclusion calculation - use optimal inclusion radius
+      const actualMaxInclusionRadius = optimalRadius;
       const minExclusionDistance = actualMaxInclusionRadius + neutralBuffer + 10;
 
       setSaveStatus('generating boundary exclusion points...');
@@ -1194,70 +1342,72 @@ User request: ${userMessage}`;
       // Distance from clinic to intermediate exclusions (cardinal directions)
       const cardinalDistance = neutralBuffer + 40 + (territorySize / 2);
 
-      // Build 8 exclusion points
+      // Build exclusion ring FIRST - these are essential for proper targeting
+      // 8 overlapping circles create a donut-shaped exclusion zone around the territory
       const exclusionPoints: Array<{ lat: number; lng: number; radius: number; name: string }> = [];
 
-      // 4 CORNER points with 45mi radius (SW, SE, NW, NE)
-      // Southwest
-      exclusionPoints.push({
-        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 45,
-        name: 'Southwest'
-      });
-      // Southeast
-      exclusionPoints.push({
-        lat: lat - milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 45,
-        name: 'Southeast'
-      });
-      // Northwest
-      exclusionPoints.push({
-        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng - milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 45,
-        name: 'Northwest'
-      });
-      // Northeast
-      exclusionPoints.push({
-        lat: lat + milesToDegreesLat(cornerDistance * 0.7),
-        lng: lng + milesToDegreesLng(cornerDistance * 0.7, lat),
-        radius: 45,
-        name: 'Northeast'
-      });
+      // 4 CORNER points (SW, SE, NW, NE) at 45mi radius - diagonal positions
+      const cornerExclusions = [
+        { lat: lat - milesToDegreesLat(cornerDistance * 0.707), lng: lng - milesToDegreesLng(cornerDistance * 0.707, lat), radius: 45, name: 'Southwest' },
+        { lat: lat - milesToDegreesLat(cornerDistance * 0.707), lng: lng + milesToDegreesLng(cornerDistance * 0.707, lat), radius: 45, name: 'Southeast' },
+        { lat: lat + milesToDegreesLat(cornerDistance * 0.707), lng: lng - milesToDegreesLng(cornerDistance * 0.707, lat), radius: 45, name: 'Northwest' },
+        { lat: lat + milesToDegreesLat(cornerDistance * 0.707), lng: lng + milesToDegreesLng(cornerDistance * 0.707, lat), radius: 45, name: 'Northeast' }
+      ];
 
-      // 4 INTERMEDIATE points with 30mi radius (S, W, N, E)
-      // South
-      exclusionPoints.push({
-        lat: lat - milesToDegreesLat(cardinalDistance),
-        lng: lng,
-        radius: 30,
-        name: 'South'
-      });
-      // West
-      exclusionPoints.push({
-        lat: lat,
-        lng: lng - milesToDegreesLng(cardinalDistance, lat),
-        radius: 30,
-        name: 'West'
-      });
-      // North
-      exclusionPoints.push({
-        lat: lat + milesToDegreesLat(cardinalDistance),
-        lng: lng,
-        radius: 30,
-        name: 'North'
-      });
-      // East
-      exclusionPoints.push({
-        lat: lat,
-        lng: lng + milesToDegreesLng(cardinalDistance, lat),
-        radius: 30,
-        name: 'East'
-      });
+      // 4 CARDINAL points (S, W, N, E) at 30mi radius
+      const cardinalExclusions = [
+        { lat: lat - milesToDegreesLat(cardinalDistance), lng: lng, radius: 30, name: 'South' },
+        { lat: lat, lng: lng - milesToDegreesLng(cardinalDistance, lat), radius: 30, name: 'West' },
+        { lat: lat + milesToDegreesLat(cardinalDistance), lng: lng, radius: 30, name: 'North' },
+        { lat: lat, lng: lng + milesToDegreesLng(cardinalDistance, lat), radius: 30, name: 'East' }
+      ];
 
-      const distributedExclusions = exclusionPoints;
+      // Add all 8 exclusion ring points first (these are mandatory)
+      for (const corner of cornerExclusions) {
+        exclusionPoints.push(corner);
+      }
+      for (const cardinal of cardinalExclusions) {
+        exclusionPoints.push(cardinal);
+      }
+
+      console.log(`Added 8-point exclusion ring (4 corners at 45mi, 4 cardinals at 30mi)`);
+
+      // Add neighbor clinic exclusions only if we have remaining slots (max 10 total)
+      const MAX_NEIGHBOR_DISTANCE = 15; // miles
+      const NEIGHBOR_EXCLUSION_RADIUS = 1; // miles
+      const remainingSlots = MAX_EXCLUSIONS - exclusionPoints.length;
+
+      if (remainingSlots > 0) {
+        const neighborExclusions: Array<{ lat: number; lng: number; radius: number; name: string }> = [];
+
+        for (const clinic of clinics) {
+          if (clinic.clinic_id === selectedClinic.clinic_id) continue;
+          if (!clinic.latitude || !clinic.longitude) continue;
+
+          const neighborLat = Number(clinic.latitude);
+          const neighborLng = Number(clinic.longitude);
+          const distanceToNeighbor = calculateDistance(lat, lng, neighborLat, neighborLng);
+
+          if (distanceToNeighbor <= MAX_NEIGHBOR_DISTANCE) {
+            neighborExclusions.push({
+              lat: neighborLat,
+              lng: neighborLng,
+              radius: NEIGHBOR_EXCLUSION_RADIUS,
+              name: `${clinic.clinic_name} clinic`
+            });
+          }
+        }
+
+        // Add up to remaining slots
+        for (let i = 0; i < Math.min(remainingSlots, neighborExclusions.length); i++) {
+          exclusionPoints.push(neighborExclusions[i]);
+        }
+
+        console.log(`Added ${Math.min(remainingSlots, neighborExclusions.length)} neighbor exclusions (${neighborExclusions.length} found, ${remainingSlots} slots available)`);
+      }
+
+      const distributedExclusions = exclusionPoints.slice(0, MAX_EXCLUSIONS);
+      console.log(`Total exclusions: ${distributedExclusions.length}`);
 
       setSaveStatus('geocoding addresses...');
 
@@ -1265,6 +1415,7 @@ User request: ${userMessage}`;
       interface LayerCircle {
         name: string;
         address: string;
+        coordinates: string;
         latitude: number;
         longitude: number;
         radius: number;
@@ -1276,32 +1427,24 @@ User request: ${userMessage}`;
       const middleLayer: LayerCircle[] = [];     // Neutral zone - documentation only
       const outerLayer: LayerCircle[] = [];      // Exclusion donut - OUTSIDE territory
 
-      // Process inclusion points - geocode all addresses for manual copy/paste
+      // Process inclusion points - resolve to real street addresses for Facebook
       const clinicAddress = selectedClinic.address
-        ? `${selectedClinic.address}, ${selectedClinic.city || ''}, ${selectedClinic.state || ''}`.trim()
-        : await getAddress(lat, lng) || 'Clinic Address';
+        ? `${selectedClinic.address}, ${selectedClinic.city || ''}, ${selectedClinic.state || ''}`.trim().replace(/, United States$/, '')
+        : await getFacebookAddress(lat, lng);
 
       for (let i = 0; i < distributedInclusions.length; i++) {
         const point = distributedInclusions[i];
 
-        setSaveStatus(`geocoding inclusions... ${i + 1}/${distributedInclusions.length}`);
+        setSaveStatus(`resolving addresses... ${i + 1}/${distributedInclusions.length}`);
 
-        let address: string;
-        let pointName: string;
-
-        if (i === 0) {
-          // Clinic location - use actual address
-          address = clinicAddress;
-          pointName = `Clinic: ${selectedClinic.clinic_name}`;
-        } else {
-          // Grid points - geocode to get real address
-          address = await getAddress(point.lat, point.lng) || `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`;
-          pointName = `Include ${i} (${point.radius}mi)`;
-        }
+        const address = i === 0
+          ? clinicAddress
+          : await getFacebookAddress(point.lat, point.lng);
 
         innerLayer.push({
-          name: pointName,
+          name: i === 0 ? `Clinic: ${selectedClinic.clinic_name}` : `Include ${i} (${point.radius}mi)`,
           address: address,
+          coordinates: `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`,
           latitude: point.lat,
           longitude: point.lng,
           radius: point.radius,
@@ -1309,7 +1452,6 @@ User request: ${userMessage}`;
           layer_type: 'include'
         });
 
-        // Small delay to avoid rate limiting
         if (i > 0) {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
@@ -1320,12 +1462,13 @@ User request: ${userMessage}`;
         const point = distributedExclusions[i];
         if (!point) continue;
 
-        const address = await getAddress(point.lat, point.lng);
+        setSaveStatus(`resolving exclusions... ${i + 1}/${distributedExclusions.length}`);
+        const address = await getFacebookAddress(point.lat, point.lng);
 
-        // Outer layer - Exclusion
         outerLayer.push({
           name: `${point.name} Exclusion`,
-          address: address || 'Address not found',
+          address: address,
+          coordinates: `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`,
           latitude: point.lat,
           longitude: point.lng,
           radius: point.radius,
@@ -1340,100 +1483,108 @@ User request: ${userMessage}`;
       const sortedInclusions = [...innerLayer].sort((a, b) => a.radius - b.radius);
       const sortedExclusions = [...outerLayer].sort((a, b) => a.radius - b.radius);
 
-      // Build simple text file
+      // Build output file — grouped by radius with section headers
       const lines: string[] = [];
 
-      lines.push(`Facebook Audience Targeting - Polygon Coverage`);
-      lines.push(`Clinic: ${selectedClinic.clinic_name} (${selectedClinic.clinic_id})`);
-      lines.push(`Metro Type: ${selectedClinic.metro_type}`);
-      lines.push(`Generated: ${new Date().toLocaleString()}`);
-      lines.push('');
-      // Count inclusions by radius
-      const radiusCounts = sortedInclusions.reduce((acc, loc) => {
-        acc[loc.radius] = (acc[loc.radius] || 0) + 1;
-        return acc;
-      }, {} as Record<number, number>);
-      const radiusSummary = Object.entries(radiusCounts)
+      // Calculate coverage stats
+      let circleCoverageInside = 0;
+      let circleCoverageOutside = 0;
+      for (const pt of distributedInclusions) {
+        const circleArea = Math.PI * pt.radius * pt.radius;
+        // Estimate inside vs outside based on distance from center relative to territory
+        const coverageRatio = Math.min(1, totalPolygonArea / (circleArea * distributedInclusions.length));
+        circleCoverageInside += circleArea * coverageRatio;
+        circleCoverageOutside += circleArea * (1 - coverageRatio);
+      }
+      const coveragePct = Math.min(100, Math.round(circleCoverageInside / totalPolygonArea * 100));
+      const overspillPct = Math.round(circleCoverageOutside / (circleCoverageInside + circleCoverageOutside) * 100);
+
+      // Build radius breakdown string
+      const radiusCounts: Record<number, number> = {};
+      for (const loc of sortedInclusions) {
+        radiusCounts[loc.radius] = (radiusCounts[loc.radius] || 0) + 1;
+      }
+      const includeBreakdown = Object.entries(radiusCounts)
         .sort(([a], [b]) => Number(a) - Number(b))
         .map(([r, c]) => `${c}x${r}mi`)
         .join(', ');
 
-      lines.push(`COVERAGE SUMMARY`);
-      lines.push(`  Include Radii: ${metroLower === 'suburban' || metroLower === 'rural' ? '5mi (all points)' : '1mi (edges), 2mi (mid), 3mi (interior)'}`);
-      lines.push(`  Include Breakdown: ${radiusSummary}`);
-      lines.push(`  Exclude Radii: 45 mi (corners) / 30 mi (cardinals)`);
+      // Exclusion radii summary
+      const excludeRadii = Array.from(new Set(sortedExclusions.map(e => e.radius))).sort((a, b) => a - b);
+      const excludeBreakdownStr = excludeRadii.map(r => `${r} mi`).join(', ');
+
+      lines.push(`Facebook Audience Targeting - Polygon Coverage`);
+      lines.push(`Clinic: ${selectedClinic.clinic_name} (${selectedClinic.clinic_id})`);
+      lines.push(`Metro Type: ${metroType}`);
+      lines.push(`Generated: ${new Date().toLocaleString()}`);
+      lines.push('');
+      lines.push('COVERAGE ANALYSIS');
+      lines.push(`  Territory Size: ${territoryWidth.toFixed(1)} x ${territoryHeight.toFixed(1)} miles`);
+      lines.push(`  Polygon Area: ~${totalPolygonArea.toFixed(1)} sq mi`);
+      lines.push(`  Circle Coverage Inside Polygon: ~${circleCoverageInside.toFixed(1)} sq mi`);
+      lines.push(`  Circle Overspill Outside Polygon: ~${circleCoverageOutside.toFixed(1)} sq mi`);
+      lines.push(`  Coverage of Territory: ${coveragePct}%`);
+      lines.push(`  Overspill Rate: ${overspillPct}% (lower is better)`);
+      lines.push('');
+      lines.push('POINT SUMMARY');
+      lines.push(`  Algorithm: Coverage-first hex grid (overlapping circles)`);
+      lines.push(`  Optimal Radius: ${optimalRadius} mi (based on ${Math.round(totalPolygonArea)} sq mi territory)`);
+      lines.push(`  Include Breakdown: ${includeBreakdown}`);
+      lines.push(`  Exclude Radii: ${excludeBreakdownStr}`);
       lines.push(`  Include Points: ${sortedInclusions.length}`);
       lines.push(`  Exclude Points: ${sortedExclusions.length}`);
       lines.push(`  Total Points: ${sortedInclusions.length + sortedExclusions.length} / 25 max`);
-      lines.push(`  Territory Size: ${territoryWidth.toFixed(1)} x ${territoryHeight.toFixed(1)} miles`);
+      lines.push(`  Target Coverage: >85% | Acceptable Overspill: <25%`);
       lines.push('');
-
-      // Age targeting section
-      const clinicName = selectedClinic.clinic_name.replace(/^The Joint Chiropractic\s+/i, '');
-      const ageData = (ageTargetingData as AgeTargetingData)[clinicName];
-      if (ageData) {
-        lines.push('='.repeat(60));
-        lines.push(`AGE TARGETING (Based on ${ageData.sample_size} first-party conversions)`);
-        lines.push('='.repeat(60));
-        lines.push('');
-        lines.push(`Tier 1 (Core):    ${ageData.t1_min}-${ageData.t1_max} years`);
-        lines.push(`Tier 2 (Broad):   ${ageData.t2_min}-${ageData.t2_max} years`);
-        lines.push(`Tier 3 (Maximum): ${ageData.t3_min}-${ageData.t3_max} years`);
-        lines.push(`Blended Range:    ${ageData.blend_min}-${ageData.blend_max} years (75% T1 / 25% T2)`);
-        lines.push('');
-        lines.push('Budget Allocation: 60-70% T1 | 25-30% T2 | 0-10% T3');
-        lines.push('');
-      }
-
-      lines.push('='.repeat(60));
+      lines.push('============================================================');
       lines.push(`INCLUDE LOCATIONS (${sortedInclusions.length} points)`);
-      lines.push('='.repeat(60));
+      lines.push('============================================================');
       lines.push('');
 
       // Group inclusions by radius
-      const inclusionsByRadius = sortedInclusions.reduce((acc, loc) => {
-        const key = loc.radius;
-        if (!acc[key]) acc[key] = [];
-        acc[key].push(loc);
-        return acc;
-      }, {} as Record<number, typeof sortedInclusions>);
+      const inclusionsByRadius: Record<number, typeof sortedInclusions> = {};
+      for (const loc of sortedInclusions) {
+        if (!inclusionsByRadius[loc.radius]) inclusionsByRadius[loc.radius] = [];
+        inclusionsByRadius[loc.radius].push(loc);
+      }
 
-      // Sort radii and output each group
-      const inclusionRadii = Object.keys(inclusionsByRadius).map(Number).sort((a, b) => a - b);
-      for (const radius of inclusionRadii) {
+      for (const radius of Object.keys(inclusionsByRadius).map(Number).sort((a, b) => a - b)) {
         lines.push(`${radius} mi radius:`);
-        for (const loc of inclusionsByRadius[radius]) {
-          lines.push(`${loc.address}`);
+        const addresses = inclusionsByRadius[radius]
+          .map(loc => loc.address)
+          .sort();
+        for (const addr of addresses) {
+          lines.push(addr);
         }
         lines.push('');
       }
 
-      lines.push('='.repeat(60));
+      lines.push('============================================================');
       lines.push(`EXCLUDE LOCATIONS (${sortedExclusions.length} points)`);
-      lines.push('='.repeat(60));
+      lines.push('============================================================');
       lines.push('');
 
       // Group exclusions by radius
-      const exclusionsByRadius = sortedExclusions.reduce((acc, loc) => {
-        const key = loc.radius;
-        if (!acc[key]) acc[key] = [];
-        acc[key].push(loc);
-        return acc;
-      }, {} as Record<number, typeof sortedExclusions>);
+      const exclusionsByRadius: Record<number, typeof sortedExclusions> = {};
+      for (const loc of sortedExclusions) {
+        if (!exclusionsByRadius[loc.radius]) exclusionsByRadius[loc.radius] = [];
+        exclusionsByRadius[loc.radius].push(loc);
+      }
 
-      // Sort radii and output each group
-      const exclusionRadii = Object.keys(exclusionsByRadius).map(Number).sort((a, b) => a - b);
-      for (const radius of exclusionRadii) {
+      for (const radius of Object.keys(exclusionsByRadius).map(Number).sort((a, b) => a - b)) {
         lines.push(`${radius} mi radius:`);
-        for (const loc of exclusionsByRadius[radius]) {
-          lines.push(`${loc.address}`);
+        const addresses = exclusionsByRadius[radius]
+          .map(loc => loc.address)
+          .sort();
+        for (const addr of addresses) {
+          lines.push(addr);
         }
         lines.push('');
       }
 
-      lines.push('='.repeat(60));
+      lines.push('============================================================');
       lines.push(`TOTAL POINTS: ${sortedInclusions.length + sortedExclusions.length} / 25`);
-      lines.push('='.repeat(60));
+      lines.push('============================================================');
 
       const textContent = lines.join('\n');
       const blob = new Blob([textContent], { type: 'text/plain' });
@@ -1453,6 +1604,68 @@ User request: ${userMessage}`;
       setSaveStatus('error');
       alert('Error exporting targeting: ' + (error as Error).message);
       setTimeout(() => setSaveStatus(''), 3000);
+    }
+  };
+
+  const pushTargetingToFacebook = async (mode: 'single' | 'batch' | 'all') => {
+    let clinicIds: string[] = [];
+
+    if (mode === 'single') {
+      if (!selectedClinic) return;
+      clinicIds = [selectedClinic.clinic_id];
+    } else if (mode === 'batch') {
+      clinicIds = Array.from(selectedClinicIds);
+      if (clinicIds.length === 0) {
+        alert('No clinics selected. Use checkboxes to select clinics first.');
+        return;
+      }
+    }
+    // mode === 'all' sends no clinic_ids, API resolves them
+
+    setPushTargetingStatus('pushing');
+    setPushTargetingResult(null);
+
+    try {
+      const response = await fetch('/api/facebook/push-targeting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          clinic_ids: mode !== 'all' ? clinicIds : undefined,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        setPushTargetingResult({ success: false, error: result.error || 'Unknown error' });
+      } else {
+        setPushTargetingResult(result);
+      }
+    } catch (error) {
+      setPushTargetingResult({ success: false, error: (error as Error).message });
+    } finally {
+      setPushTargetingStatus('done');
+    }
+  };
+
+  const toggleClinicSelection = (clinicId: string) => {
+    setSelectedClinicIds(prev => {
+      const next = new Set(prev);
+      if (next.has(clinicId)) {
+        next.delete(clinicId);
+      } else {
+        next.add(clinicId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedClinicIds.size === filteredClinics.length) {
+      setSelectedClinicIds(new Set());
+    } else {
+      setSelectedClinicIds(new Set(filteredClinics.map(c => c.clinic_id)));
     }
   };
 
@@ -1514,7 +1727,7 @@ User request: ${userMessage}`;
       while (batchCount < 50) {
         batchCount++;
 
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_by_distance_batch`, {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_with_buffer`, {
           method: 'POST',
           headers: {
             'apikey': SUPABASE_KEY,
@@ -1523,7 +1736,8 @@ User request: ${userMessage}`;
           },
           body: JSON.stringify({
             p_state: state || null,
-            p_batch_size: batchSize
+            p_batch_size: batchSize,
+            p_buffer_miles: 2.0
           })
         });
 
@@ -1625,6 +1839,30 @@ User request: ${userMessage}`;
             + Add New Location
           </button>
 
+          {selectedClinicIds.size > 0 && (
+            <button
+              onClick={() => {
+                setPushTargetingMode('batch');
+                setPushTargetingStatus('confirming');
+              }}
+              disabled={pushTargetingStatus === 'pushing'}
+              className="mt-2 w-full bg-green-600 text-white px-3 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400 text-sm"
+            >
+              Push {selectedClinicIds.size} Selected to Facebook
+            </button>
+          )}
+
+          <button
+            onClick={() => {
+              setPushTargetingMode('all');
+              setPushTargetingStatus('confirming');
+            }}
+            disabled={pushTargetingStatus === 'pushing'}
+            className="mt-2 w-full bg-gray-200 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-300 disabled:bg-gray-100 text-sm"
+          >
+            Push All Targeting to Facebook
+          </button>
+
           <AIInsightsPanel
             supabaseUrl={SUPABASE_URL}
             supabaseKey={SUPABASE_KEY}
@@ -1632,9 +1870,20 @@ User request: ${userMessage}`;
         </div>
 
         <div className="p-4">
-          <h2 className="text-lg font-semibold mb-3 text-gray-700">
-            {searchTerm ? `Found ${filteredClinics.length}` : `All Clinics (${clinics.length})`}
-          </h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold text-gray-700">
+              {searchTerm ? `Found ${filteredClinics.length}` : `All Clinics (${clinics.length})`}
+            </h2>
+            <label className="flex items-center gap-1 text-xs text-gray-500 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={selectedClinicIds.size === filteredClinics.length && filteredClinics.length > 0}
+                onChange={toggleSelectAll}
+                className="rounded border-gray-300"
+              />
+              Select All
+            </label>
+          </div>
           <div className="space-y-2">
             {filteredClinics.map(clinic => (
               <div
@@ -1655,10 +1904,22 @@ User request: ${userMessage}`;
                 }}
               >
                 <div className="flex items-start justify-between">
-                  <div>
-                    <h3 className="font-semibold text-gray-800">{clinic.clinic_name}</h3>
-                    <p className="text-sm text-gray-600">ID: {clinic.clinic_id}</p>
-                    <p className="text-xs text-gray-500">{clinic.state} - {clinic.metro_type}</p>
+                  <div className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedClinicIds.has(clinic.clinic_id)}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        toggleClinicSelection(clinic.clinic_id);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="mt-1 rounded border-gray-300"
+                    />
+                    <div>
+                      <h3 className="font-semibold text-gray-800">{clinic.clinic_name}</h3>
+                      <p className="text-sm text-gray-600">ID: {clinic.clinic_id}</p>
+                      <p className="text-xs text-gray-500">{clinic.state} - {clinic.metro_type}</p>
+                    </div>
                   </div>
                   <div style={{ color: generateColor(clinic.clinic_id) }}>
                     <MapPinIcon />
@@ -1720,6 +1981,20 @@ User request: ${userMessage}`;
                   >
                     <DownloadIcon />
                     {saveStatus && saveStatus !== 'success' && saveStatus !== 'error' ? saveStatus : 'Export FB Targeting'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setPushTargetingMode('single');
+                      setPushTargetingStatus('confirming');
+                    }}
+                    disabled={pushTargetingStatus === 'pushing'}
+                    className="w-full flex items-center justify-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 disabled:bg-gray-400"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M22 2L11 13"></path>
+                      <path d="M22 2l-7 20-4-9-9-4 20-7z"></path>
+                    </svg>
+                    {pushTargetingStatus === 'pushing' ? 'Pushing...' : 'Push to Facebook'}
                   </button>
                 </>
               ) : (
@@ -1965,6 +2240,130 @@ User request: ${userMessage}`;
                     </button>
                   )}
                 </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Push Targeting Confirmation / Results Modal */}
+        {pushTargetingStatus !== 'idle' && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-2xl p-6 max-w-lg w-full mx-4 max-h-[80vh] overflow-y-auto">
+              {pushTargetingStatus === 'confirming' && (
+                <>
+                  <h3 className="text-lg font-bold text-gray-800 mb-3">Push Targeting to Facebook</h3>
+                  <p className="text-gray-600 mb-4">
+                    {pushTargetingMode === 'single' && selectedClinic && (
+                      <>Update targeting for <strong>{selectedClinic.clinic_name}</strong> on Facebook?</>
+                    )}
+                    {pushTargetingMode === 'batch' && (
+                      <>Update targeting for <strong>{selectedClinicIds.size} selected clinics</strong> on Facebook?</>
+                    )}
+                    {pushTargetingMode === 'all' && (
+                      <>Update targeting for <strong>all clinics with targeting data</strong> on Facebook? This may take several minutes.</>
+                    )}
+                  </p>
+                  <p className="text-sm text-amber-600 bg-amber-50 p-3 rounded-lg mb-4">
+                    This will replace the location targeting on all active ad sets in matching campaigns. Non-location targeting (age, interests, platforms) will be preserved.
+                  </p>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => {
+                        setPushTargetingStatus('idle');
+                        setPushTargetingResult(null);
+                      }}
+                      className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => pushTargetingToFacebook(pushTargetingMode)}
+                      className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                    >
+                      Confirm Push
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {pushTargetingStatus === 'pushing' && (
+                <div className="text-center py-8">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600 mx-auto mb-4"></div>
+                  <p className="text-gray-700 font-medium">Pushing targeting to Facebook...</p>
+                  <p className="text-sm text-gray-500 mt-2">This may take a few minutes for large batches.</p>
+                </div>
+              )}
+
+              {pushTargetingStatus === 'done' && pushTargetingResult && (
+                <>
+                  <h3 className="text-lg font-bold text-gray-800 mb-3">
+                    {pushTargetingResult.success ? 'Targeting Updated' : 'Update Failed'}
+                  </h3>
+
+                  {pushTargetingResult.error && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg mb-4">
+                      {pushTargetingResult.error}
+                    </div>
+                  )}
+
+                  {pushTargetingResult.summary && (
+                    <div className="grid grid-cols-3 gap-3 mb-4">
+                      <div className="bg-green-50 p-3 rounded-lg text-center">
+                        <p className="text-2xl font-bold text-green-700">{pushTargetingResult.summary.updated}</p>
+                        <p className="text-xs text-green-600">Updated</p>
+                      </div>
+                      <div className="bg-yellow-50 p-3 rounded-lg text-center">
+                        <p className="text-2xl font-bold text-yellow-700">{pushTargetingResult.summary.skipped}</p>
+                        <p className="text-xs text-yellow-600">Skipped</p>
+                      </div>
+                      <div className="bg-red-50 p-3 rounded-lg text-center">
+                        <p className="text-2xl font-bold text-red-700">{pushTargetingResult.summary.errors}</p>
+                        <p className="text-xs text-red-600">Errors</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {pushTargetingResult.results && pushTargetingResult.results.length > 0 && (
+                    <div className="max-h-48 overflow-y-auto mb-4">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="text-left p-2">Clinic</th>
+                            <th className="text-left p-2">Status</th>
+                            <th className="text-left p-2">Ad Sets</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pushTargetingResult.results.map((r) => (
+                            <tr key={r.clinic_id} className="border-t">
+                              <td className="p-2">{r.clinic_name}</td>
+                              <td className="p-2">
+                                <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                                  r.status === 'updated' ? 'bg-green-100 text-green-700' :
+                                  r.status === 'skipped' ? 'bg-yellow-100 text-yellow-700' :
+                                  'bg-red-100 text-red-700'
+                                }`}>
+                                  {r.status}
+                                </span>
+                              </td>
+                              <td className="p-2 text-gray-600">{r.adsets_updated ?? r.reason ?? '-'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => {
+                      setPushTargetingStatus('idle');
+                      setPushTargetingResult(null);
+                    }}
+                    className="w-full px-4 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900"
+                  >
+                    Close
+                  </button>
+                </>
               )}
             </div>
           </div>

@@ -1,0 +1,218 @@
+{
+  "name": "Active Campaign Audience Audit",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "active-campaign-audience-audit",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wh",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "webhookId": "active-campaign-audience-audit"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://xhyttombqrhqvnycyzlj.supabase.co/rest/v1/fb_saved_audiences",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendQuery": true,
+        "queryParameters": {"parameters": [{"name": "select", "value": "audience_id,kind"}]},
+        "options": {}
+      },
+      "id": "load-sa",
+      "name": "Load SA Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300],
+      "credentials": {"supabaseApi": {"id": "9wxMVkfSJBYoL43Q", "name": "Supabase account"}}
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nstaticData.campaigns = [];\nstaticData.adsets = {};\nstaticData.account_counts = {};\nstaticData.ab_by_campaign = {};\nconst rows = $input.first().json;\nconst arr = Array.isArray(rows) ? rows : (rows.data || []);\nconst saMap = {};\nfor (const r of arr) saMap[r.audience_id] = r.kind;\nstaticData.saMap = saMap;\nreturn [{ json: { sa_count: arr.length } }];\n"
+      },
+      "id": "init",
+      "name": "Init Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  { json: { account_id: 'act_10201019819851931', label: 'Account 1' } },\n  { json: { account_id: 'act_708812601077037',  label: 'Account 2' } },\n  { json: { account_id: 'act_293603336988341',  label: 'Account 3' } },\n  { json: { account_id: 'act_3684421665103341', label: 'Account 4' } },\n  { json: { account_id: 'act_249137098153238',  label: 'Account 5' } },\n  { json: { account_id: 'act_1738224836936889', label: 'Account 6' } },\n  { json: { account_id: 'act_1093083055897528', label: 'Account 7' } }\n];\n"
+      },
+      "id": "emit-acct",
+      "name": "Emit Per Account",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop-acct",
+      "name": "Loop Accounts",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v24.0/{{ $('Loop Accounts').item.json.account_id }}/campaigns",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "fields", "value": "id,name,status,effective_status"},
+            {"name": "limit", "value": "100"},
+            {"name": "filtering", "value": "[{\"field\":\"effective_status\",\"operator\":\"IN\",\"value\":[\"ACTIVE\",\"PAUSED\",\"CAMPAIGN_PAUSED\",\"WITH_ISSUES\",\"PENDING_REVIEW\",\"DISAPPROVED\",\"PREAPPROVED\",\"PENDING_BILLING_INFO\",\"IN_PROCESS\"]}]"}
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {"parameters": [{"type": "qs", "name": "after", "value": "={{ $response.body.paging && $response.body.paging.cursors ? $response.body.paging.cursors.after : '' }}"}]},
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body || !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 200
+            }
+          }
+        }
+      },
+      "id": "list-camps",
+      "name": "List Campaigns",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, 300],
+      "credentials": {"facebookGraphApi": {"id": "JAEtqLx2roZPZJ0G", "name": "Facebook Graph User"}}
+    },
+    {
+      "parameters": {
+        "jsCode": "const account = $('Loop Accounts').item.json;\nconst pages = $input.all();\nconst staticData = $getWorkflowStaticData('global');\nstaticData.campaigns = staticData.campaigns || [];\nstaticData.ab_by_campaign = staticData.ab_by_campaign || {};\nstaticData.account_counts = staticData.account_counts || {};\nstaticData.account_counts[account.account_id] = staticData.account_counts[account.account_id] || { A: 0, B: 0 };\n\nfor (const p of pages) {\n  const data = Array.isArray(p.json.data) ? p.json.data : [];\n  for (const c of data) {\n    if (!c.name) continue;\n    const hasA = /\\(A\\)/.test(c.name);\n    const hasB = /\\(B\\)/.test(c.name);\n    if (!hasA && !hasB) continue;\n    const tag = hasA ? 'A' : 'B';\n    staticData.account_counts[account.account_id][tag]++;\n    const row = { account_id: account.account_id, campaign_id: c.id, campaign_name: c.name, tag, status: c.status, effective_status: c.effective_status };\n    staticData.campaigns.push(row);\n    staticData.ab_by_campaign[c.id] = row;\n  }\n}\n\nreturn [{ json: { account_id: account.account_id, ab_campaigns: Object.keys(staticData.ab_by_campaign).filter(k => staticData.ab_by_campaign[k].account_id === account.account_id).length }, pairedItem: { item: 0 } }];\n"
+      },
+      "id": "filter-ab",
+      "name": "Filter (A)/(B) Campaigns",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1520, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://graph.facebook.com/v24.0/{{ $('Loop Accounts').item.json.account_id }}/adsets",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {"name": "fields", "value": "id,name,status,effective_status,saved_audience_id,campaign_id,targeting"},
+            {"name": "limit", "value": "100"},
+            {"name": "filtering", "value": "[{\"field\":\"effective_status\",\"operator\":\"IN\",\"value\":[\"ACTIVE\",\"PAUSED\",\"CAMPAIGN_PAUSED\",\"WITH_ISSUES\",\"PENDING_REVIEW\",\"DISAPPROVED\",\"PREAPPROVED\",\"PENDING_BILLING_INFO\",\"IN_PROCESS\"]}]"}
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {"parameters": [{"type": "qs", "name": "after", "value": "={{ $response.body.paging && $response.body.paging.cursors ? $response.body.paging.cursors.after : '' }}"}]},
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body || !$response.body.paging || !$response.body.paging.next }}",
+              "limitPagesFetched": true,
+              "maxRequests": 100,
+              "requestInterval": 500
+            }
+          }
+        }
+      },
+      "id": "get-adsets",
+      "name": "Get Ad Sets",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1740, 300],
+      "credentials": {"facebookGraphApi": {"id": "JAEtqLx2roZPZJ0G", "name": "Facebook Graph User"}},
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Classifier matches clinic-manager FB targeting export pattern:\n//   drive_time = many small inclusion circles (<=5mi) AND >=4 large exclusion circles (>=20mi)\n// Anything else with custom_locations but not matching the pattern = legacy_partial_pattern\n// 1-3 circles, no exclusions = legacy_simple_radius\n// city/zip/region = legacy_geo_classic\nconst account = $('Loop Accounts').item.json;\nconst pages = $input.all();\nconst staticData = $getWorkflowStaticData('global');\nconst saMap = staticData.saMap || {};\nconst ab = staticData.ab_by_campaign || {};\nstaticData.adsets = staticData.adsets || {};\n\nfunction classify(t) {\n  if (!t) return { kind: 'no_targeting', smallIncl: 0, largeExcl: 0, totalIncl: 0, totalExcl: 0, hasCities: false, hasZips: false, hasRegions: false };\n  const geo = t.geo_locations || {};\n  const exGeo = t.excluded_geo_locations || {};\n  const incl = Array.isArray(geo.custom_locations) ? geo.custom_locations : [];\n  const excl = Array.isArray(exGeo.custom_locations) ? exGeo.custom_locations : [];\n  const cities = Array.isArray(geo.cities) ? geo.cities.length : 0;\n  const zips = Array.isArray(geo.zips) ? geo.zips.length : 0;\n  const regions = Array.isArray(geo.regions) ? geo.regions.length : 0;\n  const meta = { totalIncl: incl.length, totalExcl: excl.length, hasCities: cities > 0, hasZips: zips > 0, hasRegions: regions > 0,\n    smallIncl: incl.filter(p => (p.radius != null ? p.radius : 99) <= 5).length,\n    largeExcl: excl.filter(p => (p.radius != null ? p.radius : 0) >= 20).length };\n  if (cities || zips || regions) return Object.assign({ kind: 'legacy_geo_classic' }, meta);\n  if (incl.length === 0) return Object.assign({ kind: 'no_geo' }, meta);\n  if (meta.smallIncl >= 5 && meta.largeExcl >= 4) return Object.assign({ kind: 'drive_time' }, meta);\n  if (incl.length <= 3 && excl.length === 0) return Object.assign({ kind: 'legacy_simple_radius' }, meta);\n  return Object.assign({ kind: 'legacy_partial_pattern' }, meta);\n}\n\nlet adsetsSeen = 0;\nlet adsetsKept = 0;\nlet errPages = 0;\nstaticData.errors = staticData.errors || [];\nfor (const p of pages) {\n  if (p.json && p.json.error) { errPages++; staticData.errors.push({account: account.account_id, err: p.json.error.message || JSON.stringify(p.json.error).slice(0,200)}); continue; }\n  if (!Array.isArray(p.json && p.json.data)) { errPages++; staticData.errors.push({account: account.account_id, err: 'no_data_field', sample: JSON.stringify(p.json).slice(0,300)}); continue; }\n  const data = p.json.data;\n  for (const a of data) {\n    adsetsSeen++;\n    const camp = ab[a.campaign_id];\n    if (!camp) continue;\n    adsetsKept++;\n    const said = a.saved_audience_id || null;\n    const c = classify(a.targeting);\n    let kind = c.kind;\n    if (said) {\n      const fromInventory = saMap[said];\n      kind = fromInventory === 'drive_time' ? 'drive_time' : ('sa_' + (fromInventory || 'unknown'));\n    }\n    staticData.adsets[a.id] = {\n      account_id: camp.account_id,\n      campaign_id: camp.campaign_id,\n      campaign_name: camp.campaign_name,\n      tag: camp.tag,\n      adset_id: a.id,\n      adset_name: a.name,\n      adset_effective: a.effective_status,\n      saved_audience_id: said,\n      small_incl_count: c.smallIncl,\n      large_excl_count: c.largeExcl,\n      total_incl_count: c.totalIncl,\n      total_excl_count: c.totalExcl,\n      has_cities: c.hasCities,\n      has_zips: c.hasZips,\n      has_regions: c.hasRegions,\n      kind\n    };\n  }\n}\nreturn [{ json: { account_id: account.account_id, adsets_seen: adsetsSeen, adsets_kept: adsetsKept, errored_pages: errPages, total_classified: Object.keys(staticData.adsets).length }, pairedItem: { item: 0 } }];\n"
+      },
+      "id": "classify",
+      "name": "Classify Ad Sets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a single item containing the adset rows array as a JSON string.\nconst staticData = $getWorkflowStaticData('global');\nconst adsets = staticData.adsets || {};\nconst now = new Date().toISOString();\nconst rows = [];\nfor (const ad of Object.values(adsets)) {\n  rows.push({ ...ad, audited_at: now });\n}\nreturn [{ json: { row_count: rows.length, body: JSON.stringify(rows) } }];\n"
+      },
+      "id": "emit-rows",
+      "name": "Build Audit Body",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://xhyttombqrhqvnycyzlj.supabase.co/rest/v1/fb_adset_audit",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {"parameters": [
+          {"name": "Prefer", "value": "resolution=merge-duplicates"},
+          {"name": "Content-Type", "value": "application/json"}
+        ]},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "persist",
+      "name": "Persist Audit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1520, 100],
+      "credentials": {"supabaseApi": {"id": "9wxMVkfSJBYoL43Q", "name": "Supabase account"}}
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst campaigns = staticData.campaigns || [];\nconst adsets = staticData.adsets || {};\nconst kindCounts = {};\nfor (const ad of Object.values(adsets)) kindCounts[ad.kind] = (kindCounts[ad.kind] || 0) + 1;\nconst byAccountKind = {};\nfor (const ad of Object.values(adsets)) {\n  byAccountKind[ad.account_id] = byAccountKind[ad.account_id] || {};\n  byAccountKind[ad.account_id][ad.kind] = (byAccountKind[ad.account_id][ad.kind] || 0) + 1;\n}\nlet dt = 0, notDt = 0;\nfor (const [k, n] of Object.entries(kindCounts)) { if (k === 'drive_time') dt += n; else notDt += n; }\n\nstaticData.campaigns = [];\nstaticData.adsets = {};\nstaticData.account_counts = {};\nstaticData.ab_by_campaign = {};\nstaticData.saMap = {};\n\nconst errors = staticData.errors || [];\nstaticData.errors = [];\nreturn [{ json: {\n  total_AB_campaigns: campaigns.length,\n  total_adsets: Object.keys(adsets).length,\n  drive_time_adsets: dt,\n  legacy_adsets: notDt,\n  by_kind: kindCounts,\n  by_account_kind: byAccountKind,\n  error_count: errors.length,\n  error_samples: errors.slice(0, 10),\n  persisted: true\n}}];\n"
+      },
+      "id": "summary",
+      "name": "Final Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1740, 100]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {"main": [[{"node": "Load SA Inventory", "type": "main", "index": 0}]]},
+    "Load SA Inventory": {"main": [[{"node": "Init Run", "type": "main", "index": 0}]]},
+    "Init Run": {"main": [[{"node": "Emit Per Account", "type": "main", "index": 0}]]},
+    "Emit Per Account": {"main": [[{"node": "Loop Accounts", "type": "main", "index": 0}]]},
+    "Loop Accounts": {"main": [
+      [{"node": "Build Audit Body", "type": "main", "index": 0}],
+      [{"node": "List Campaigns", "type": "main", "index": 0}]
+    ]},
+    "List Campaigns": {"main": [[{"node": "Filter (A)/(B) Campaigns", "type": "main", "index": 0}]]},
+    "Filter (A)/(B) Campaigns": {"main": [[{"node": "Get Ad Sets", "type": "main", "index": 0}]]},
+    "Get Ad Sets": {"main": [[{"node": "Classify Ad Sets", "type": "main", "index": 0}]]},
+    "Classify Ad Sets": {"main": [[{"node": "Loop Accounts", "type": "main", "index": 0}]]},
+    "Build Audit Body": {"main": [[{"node": "Persist Audit", "type": "main", "index": 0}]]},
+    "Persist Audit": {"main": [[{"node": "Final Summary", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1"}
+}

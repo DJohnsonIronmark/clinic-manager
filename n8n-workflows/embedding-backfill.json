@@ -1,0 +1,227 @@
+{
+  "name": "Embedding Backfill (Manual)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "table_name",
+              "value": "={{ $execution.customData?.table_name || 'client_seo_information' }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "batch_size",
+              "value": "={{ $execution.customData?.batch_size || 100 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-params",
+      "name": "Set Parameters",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://xhyttombqrhqvnycyzlj.supabase.co/functions/v1/backfill-embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"table_name\": \"{{ $json.table_name }}\",\n  \"batch_size\": {{ $json.batch_size }}\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "queue-records",
+      "name": "Queue Records for Embedding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "supabase-anon-key",
+          "name": "Supabase Anon Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-more",
+              "leftValue": "={{ $json.total_remaining }}",
+              "rightValue": "={{ $json.queued }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-more",
+      "name": "More Records?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [940, 300]
+    },
+    {
+      "parameters": {
+        "amount": 1,
+        "unit": "seconds"
+      },
+      "id": "wait",
+      "name": "Wait 1s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1180, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://xhyttombqrhqvnycyzlj.supabase.co/functions/v1/backfill-embeddings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"table_name\": \"{{ $('Set Parameters').item.json.table_name }}\",\n  \"batch_size\": {{ $('Set Parameters').item.json.batch_size }},\n  \"offset\": {{ $json.next_offset || 0 }}\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "queue-more",
+      "name": "Queue More Records",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1420, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "supabase-anon-key",
+          "name": "Supabase Anon Key"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "done",
+      "name": "All Queued",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1180, 400]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Parameters": {
+      "main": [
+        [
+          {
+            "node": "Queue Records for Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue Records for Embedding": {
+      "main": [
+        [
+          {
+            "node": "More Records?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "More Records?": {
+      "main": [
+        [
+          {
+            "node": "Wait 1s",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "All Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 1s": {
+      "main": [
+        [
+          {
+            "node": "Queue More Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue More Records": {
+      "main": [
+        [
+          {
+            "node": "More Records?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "clinic-manager"
+  },
+  "tags": [
+    {
+      "name": "AI",
+      "id": "ai-tag"
+    },
+    {
+      "name": "Embeddings",
+      "id": "embeddings-tag"
+    }
+  ]
+}
