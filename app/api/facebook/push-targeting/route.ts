@@ -12,6 +12,7 @@ interface PushTargetingRequest {
   mode: 'single' | 'batch' | 'all';
   clinic_ids?: string[];
   dry_run?: boolean;
+  account_ids?: string[];
 }
 
 export async function POST(request: NextRequest) {
@@ -64,10 +65,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify all clinics have targeting data
+    // Verify all clinics have targeting data (also pull state for SA naming)
     const { data: clinicsWithTargeting, error: verifyError } = await supabase
       .from('clinic_territories')
-      .select('clinic_id, clinic_name, fb_geo_locations, fb_saved_audience_ids')
+      .select('clinic_id, clinic_name, state, fb_geo_locations, fb_saved_audience_ids')
       .in('clinic_id', clinicIds)
       .not('fb_geo_locations', 'is', null);
 
@@ -95,17 +96,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const NAME_TO_CODE: Record<string, string> = {
+      Alabama:'AL',Alaska:'AK',Arizona:'AZ',Arkansas:'AR',California:'CA',Colorado:'CO',
+      Connecticut:'CT',Delaware:'DE','District of Columbia':'DC',Florida:'FL',Georgia:'GA',
+      Hawaii:'HI',Idaho:'ID',Illinois:'IL',Indiana:'IN',Iowa:'IA',Kansas:'KS',Kentucky:'KY',
+      Louisiana:'LA',Maine:'ME',Maryland:'MD',Massachusetts:'MA',Michigan:'MI',Minnesota:'MN',
+      Mississippi:'MS',Missouri:'MO',Montana:'MT',Nebraska:'NE',Nevada:'NV',
+      'New Hampshire':'NH','New Jersey':'NJ','New Mexico':'NM','New York':'NY',
+      'North Carolina':'NC','North Dakota':'ND',Ohio:'OH',Oklahoma:'OK',Oregon:'OR',
+      Pennsylvania:'PA','Rhode Island':'RI','South Carolina':'SC','South Dakota':'SD',
+      Tennessee:'TN',Texas:'TX',Utah:'UT',Vermont:'VT',Virginia:'VA',Washington:'WA',
+      'West Virginia':'WV',Wisconsin:'WI',Wyoming:'WY',
+    };
+    const toStateCode = (s: string | null | undefined): string => {
+      if (!s) return '';
+      if (s.length === 2) return s.toUpperCase();
+      return NAME_TO_CODE[s] || s;
+    };
+
     const n8nPayload = {
       mode: body.mode,
       clinic_ids: clinicIdsWithData,
       dry_run: body.dry_run || false,
+      account_ids: body.account_ids,
       clinics: clinicsWithData.map(c => ({
         clinic_id: c.clinic_id,
         clinic_name: c.clinic_name,
+        state_code: toStateCode((c as { state?: string }).state),
         fb_geo_locations: c.fb_geo_locations,
-        // Map of { ad_account_id: saved_audience_id } — used by the n8n
-        // dual-write branch to update each clinic's saved audience(s) in
-        // parallel with the inline ad-set update.
         fb_saved_audience_ids: c.fb_saved_audience_ids || {}
       }))
     };

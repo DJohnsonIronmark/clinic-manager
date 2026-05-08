@@ -1,4 +1,5 @@
 {
+  "id": "2rsUMZ9PGXKHP1qj",
   "name": "Facebook Targeting Pusher",
   "nodes": [
     {
@@ -33,7 +34,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Emit a single item carrying the full payload (clinics array + account list)\n// so downstream pre-fetch + clinic loop can each access what they need.\nconst input = $input.first().json.body || $input.first().json;\nconst clinics = input.clinics || [];\nconst dryRun = input.dry_run || false;\nconst mode = input.mode || 'single';\n\nif (clinics.length === 0) {\n  return [{ json: { error: 'No clinics provided', clinics: [], account_ids: [], dry_run: dryRun, mode } }];\n}\n\nreturn [{ json: {\n  dry_run: dryRun,\n  mode,\n  clinics,\n  account_ids: [\"act_10201019819851931\", \"act_708812601077037\", \"act_293603336988341\", \"act_3684421665103341\", \"act_249137098153238\", \"act_1738224836936889\", \"act_1093083055897528\"]\n}}];\n"
+        "jsCode": "// Emit a single item carrying the full payload (clinics array + account list)\n// so downstream pre-fetch + clinic loop can each access what they need.\nconst input = $input.first().json.body || $input.first().json;\nconst clinics = input.clinics || [];\nconst dryRun = input.dry_run || false;\nconst mode = input.mode || 'single';\nconst DEFAULT_ACCOUNTS = [\"act_10201019819851931\", \"act_708812601077037\", \"act_293603336988341\", \"act_3684421665103341\", \"act_249137098153238\", \"act_1738224836936889\", \"act_1093083055897528\"];\nconst accountIds = (Array.isArray(input.account_ids) && input.account_ids.length > 0) ? input.account_ids : DEFAULT_ACCOUNTS;\n\nif (clinics.length === 0) {\n  return [{ json: { error: 'No clinics provided', clinics: [], account_ids: [], dry_run: dryRun, mode } }];\n}\n\nreturn [{ json: { dry_run: dryRun, mode, clinics, account_ids: accountIds }}];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -167,7 +168,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Aggregate across ALL loop iterations. The Loop Done input only carries a\n// signal item, so reach back to per-iteration nodes via $('Node').all() which\n// in n8n returns the cumulative output across every SplitInBatches iteration.\nconst adSetUpdates = $('Update Ad Set Targeting').all();\nconst buildItems = $('Build Targeting Payload').all();\nconst tagSAItems = $('Tag SA Result').all();\nconst fanoutItems = $('Fan-out Saved Audiences').all();\n\nconst clinicResults = {};\nconst savedAudienceResults = [];\n\nfunction ensureClinic(clinicId, clinicName) {\n  if (!clinicResults[clinicId]) {\n    clinicResults[clinicId] = {\n      clinic_id: clinicId,\n      clinic_name: clinicName,\n      adsets_updated: 0,\n      adsets_errors: 0,\n      adsets_skipped: 0,\n      details: []\n    };\n  }\n  return clinicResults[clinicId];\n}\n\n// Real ad-set updates (one item per ad-set HTTP call)\nfor (const item of adSetUpdates) {\n  const d = item.json;\n  if (!d.clinic_id) continue;\n  const c = ensureClinic(d.clinic_id, d.clinic_name);\n  const success = d.body?.success === true || (d.statusCode >= 200 && d.statusCode < 300);\n  if (success) {\n    c.adsets_updated++;\n  } else {\n    c.adsets_errors++;\n    c.details.push({\n      adset_id: d.adset_id,\n      error: d.body?.error?.message || `HTTP ${d.statusCode || '?'}`\n    });\n  }\n}\n\n// Skip/dry-run items (didn't reach Update Ad Set Targeting)\nfor (const item of buildItems) {\n  const d = item.json;\n  if (!d.clinic_id) continue;\n  if (!(d.skip === true || d.dry_run === true)) continue;\n  const c = ensureClinic(d.clinic_id, d.clinic_name);\n  c.adsets_skipped++;\n}\n\n// Saved-audience updates\nfor (const item of tagSAItems) {\n  const d = item.json;\n  if (!d.clinic_id || !d.sa_account_id) continue;\n  savedAudienceResults.push({\n    clinic_id: d.clinic_id,\n    account_id: d.sa_account_id,\n    saved_audience_id: d.sa_saved_audience_id,\n    status: d.sa_success ? 'updated' : 'error',\n    ...(d.sa_error ? { error: d.sa_error } : {})\n  });\n}\n\n// Saved-audience skipped/dry-run items (from Fan-out, didn't reach Update SA)\nfor (const item of fanoutItems) {\n  const d = item.json;\n  if (!d.clinic_id || !d.sa_account_id) continue;\n  if (!(d.sa_skipped === true || d.dry_run === true)) continue;\n  savedAudienceResults.push({\n    clinic_id: d.clinic_id,\n    account_id: d.sa_account_id,\n    saved_audience_id: d.sa_saved_audience_id,\n    status: 'skipped',\n    ...(d.sa_skip_reason ? { error: d.sa_skip_reason } : {})\n  });\n}\n\nconst results = Object.values(clinicResults).map(r => ({\n  ...r,\n  status: r.adsets_updated > 0 ? 'updated'\n        : r.adsets_skipped > 0 && r.adsets_errors === 0 ? 'skipped'\n        : r.adsets_errors > 0 ? 'error'\n        : 'no_adsets'\n}));\n\nlet updated = 0, skipped = 0, errors = 0;\nfor (const r of results) {\n  if (r.status === 'updated') updated++;\n  else if (r.status === 'skipped' || r.status === 'no_adsets') skipped++;\n  else errors++;\n}\n\nlet saUpdated = 0, saErrors = 0, saSkipped = 0;\nfor (const r of savedAudienceResults) {\n  if (r.status === 'updated') saUpdated++;\n  else if (r.status === 'error') saErrors++;\n  else if (r.status === 'skipped') saSkipped++;\n}\n\nreturn [{\n  json: {\n    success: true,\n    results,\n    saved_audience_results: savedAudienceResults,\n    summary: {\n      updated, skipped, errors,\n      saved_audiences: { updated: saUpdated, errors: saErrors, skipped: saSkipped }\n    }\n  }\n}];\n"
+        "jsCode": "// Aggregate across ALL loop iterations. The Loop Done input only carries a\n// signal item, so reach back to per-iteration nodes via $('Node').all().\nconst adSetUpdates = $('Update Ad Set Targeting').all();\nconst buildItems = $('Build Targeting Payload').all();\nconst tagSAItems = $('Tag SA Result').all();\nconst tagCreatedItems = $('Tag Created SA').all();\nconst fanoutItems = $('Fan-out Saved Audiences').all();\n\nconst clinicResults = {};\nconst savedAudienceResults = [];\n\nfunction ensureClinic(clinicId, clinicName) {\n  if (!clinicResults[clinicId]) {\n    clinicResults[clinicId] = {\n      clinic_id: clinicId,\n      clinic_name: clinicName,\n      adsets_updated: 0,\n      adsets_errors: 0,\n      adsets_skipped: 0,\n      details: []\n    };\n  }\n  return clinicResults[clinicId];\n}\n\nfor (const item of adSetUpdates) {\n  const d = item.json;\n  if (!d.clinic_id) continue;\n  const c = ensureClinic(d.clinic_id, d.clinic_name);\n  const success = d.body?.success === true || (d.statusCode >= 200 && d.statusCode < 300);\n  if (success) c.adsets_updated++;\n  else { c.adsets_errors++; c.details.push({ adset_id: d.adset_id, error: d.body?.error?.message || `HTTP ${d.statusCode || '?'}` }); }\n}\n\nfor (const item of buildItems) {\n  const d = item.json;\n  if (!d.clinic_id) continue;\n  if (!(d.skip === true || d.dry_run === true)) continue;\n  const c = ensureClinic(d.clinic_id, d.clinic_name);\n  c.adsets_skipped++;\n}\n\nfor (const item of tagSAItems) {\n  const d = item.json;\n  if (!d.clinic_id || !d.sa_account_id) continue;\n  savedAudienceResults.push({\n    clinic_id: d.clinic_id,\n    account_id: d.sa_account_id,\n    saved_audience_id: d.sa_saved_audience_id,\n    status: d.sa_success ? 'updated' : 'error',\n    ...(d.sa_error ? { error: d.sa_error } : {})\n  });\n}\n\nfor (const item of tagCreatedItems) {\n  const d = item.json;\n  if (!d.clinic_id || !d.sa_account_id) continue;\n  savedAudienceResults.push({\n    clinic_id: d.clinic_id,\n    account_id: d.sa_account_id,\n    saved_audience_id: d.sa_saved_audience_id,\n    saved_audience_name: d.sa_audience_name,\n    status: d.sa_success ? 'created' : 'error',\n    ...(d.sa_error ? { error: d.sa_error } : {})\n  });\n}\n\nfor (const item of fanoutItems) {\n  const d = item.json;\n  if (!d.clinic_id || !d.sa_account_id) continue;\n  if (!(d.sa_skipped === true || d.dry_run === true)) continue;\n  savedAudienceResults.push({\n    clinic_id: d.clinic_id,\n    account_id: d.sa_account_id,\n    saved_audience_id: d.sa_saved_audience_id,\n    status: 'skipped',\n    ...(d.sa_skip_reason ? { error: d.sa_skip_reason } : (d.sa_needs_create ? { error: 'dry_run_would_create' } : {}))\n  });\n}\n\nconst results = Object.values(clinicResults).map(r => ({\n  ...r,\n  status: r.adsets_updated > 0 ? 'updated'\n        : r.adsets_skipped > 0 && r.adsets_errors === 0 ? 'skipped'\n        : r.adsets_errors > 0 ? 'error'\n        : 'no_adsets'\n}));\n\nlet updated = 0, skipped = 0, errors = 0;\nfor (const r of results) {\n  if (r.status === 'updated') updated++;\n  else if (r.status === 'skipped' || r.status === 'no_adsets') skipped++;\n  else errors++;\n}\n\nlet saUpdated = 0, saCreated = 0, saErrors = 0, saSkipped = 0;\nfor (const r of savedAudienceResults) {\n  if (r.status === 'updated') saUpdated++;\n  else if (r.status === 'created') saCreated++;\n  else if (r.status === 'error') saErrors++;\n  else if (r.status === 'skipped') saSkipped++;\n}\n\nreturn [{\n  json: {\n    success: true,\n    results,\n    saved_audience_results: savedAudienceResults,\n    summary: {\n      updated, skipped, errors,\n      saved_audiences: { updated: saUpdated, created: saCreated, errors: saErrors, skipped: saSkipped }\n    }\n  }\n}];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -237,7 +238,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Fan out clinics \u00d7 accounts to one item per (clinic, account) where a saved audience exists\n// AND the audience is classified as drive_time in fb_saved_audiences. legacy_geo / unknown\n// audiences are skipped (and reported as such) so we don't blow away hand-crafted targeting.\nconst cfg = $('Parse Input').first().json;\nconst clinics = cfg.clinics || [];\n\n// Build set of allowed (account_id|audience_id) keys from Supabase response\nconst rows = ($input.first().json.data || $input.first().json || []);\nconst allowed = new Set();\nfor (const r of (Array.isArray(rows) ? rows : [])) {\n  if (r.account_id && r.audience_id) allowed.add(`${r.account_id}|${r.audience_id}`);\n}\n\nconst out = [];\nfor (const c of clinics) {\n  const ids = c.fb_saved_audience_ids || {};\n  for (const [accountId, savedAudienceId] of Object.entries(ids)) {\n    if (!savedAudienceId) continue;\n    const key = `${accountId}|${savedAudienceId}`;\n    if (!allowed.has(key)) {\n      // emit a skip marker so Format Response can report it\n      out.push({ json: {\n        clinic_id: c.clinic_id,\n        clinic_name: c.clinic_name,\n        sa_account_id: accountId,\n        sa_saved_audience_id: savedAudienceId,\n        sa_skipped: true,\n        sa_skip_reason: 'not_drive_time',\n        sa_success: false,\n        dry_run: cfg.dry_run\n      }});\n      continue;\n    }\n    out.push({ json: {\n      clinic_id: c.clinic_id,\n      clinic_name: c.clinic_name,\n      fb_geo_locations: c.fb_geo_locations,\n      dry_run: cfg.dry_run,\n      sa_account_id: accountId,\n      sa_saved_audience_id: savedAudienceId\n    }});\n  }\n}\nreturn out;\n"
+        "jsCode": "// Iterate every (clinic, selected_account). For each:\n// - mapped + drive_time \u2192 update existing SA\n// - mapped but not drive_time \u2192 sa_skipped (don't blow away hand-crafted)\n// - not mapped \u2192 sa_needs_create (auto-create with name '{clinic} ({ST})')\nconst cfg = $('Parse Input').first().json;\nconst clinics = cfg.clinics || [];\nconst selectedAccounts = cfg.account_ids || [];\n\nconst rows = ($input.first().json.data || $input.first().json || []);\nconst allowed = new Set();\nfor (const r of (Array.isArray(rows) ? rows : [])) {\n  if (r.account_id && r.audience_id) allowed.add(`${r.account_id}|${r.audience_id}`);\n}\n\nconst out = [];\nfor (const c of clinics) {\n  const ids = c.fb_saved_audience_ids || {};\n  for (const accountId of selectedAccounts) {\n    const savedAudienceId = ids[accountId];\n    if (!savedAudienceId) {\n      // No mapping \u2192 auto-create\n      const audName = `${c.clinic_name}${c.state_code ? ' (' + c.state_code + ')' : ''}`.trim();\n      out.push({ json: {\n        clinic_id: c.clinic_id,\n        clinic_name: c.clinic_name,\n        fb_geo_locations: c.fb_geo_locations,\n        sa_account_id: accountId,\n        sa_audience_name: audName,\n        sa_needs_create: true,\n        dry_run: cfg.dry_run\n      }});\n      continue;\n    }\n    const key = `${accountId}|${savedAudienceId}`;\n    if (!allowed.has(key)) {\n      out.push({ json: {\n        clinic_id: c.clinic_id,\n        clinic_name: c.clinic_name,\n        sa_account_id: accountId,\n        sa_saved_audience_id: savedAudienceId,\n        sa_skipped: true,\n        sa_skip_reason: 'not_drive_time',\n        sa_success: false,\n        dry_run: cfg.dry_run\n      }});\n      continue;\n    }\n    out.push({ json: {\n      clinic_id: c.clinic_id,\n      clinic_name: c.clinic_name,\n      fb_geo_locations: c.fb_geo_locations,\n      dry_run: cfg.dry_run,\n      sa_account_id: accountId,\n      sa_saved_audience_id: savedAudienceId\n    }});\n  }\n}\nreturn out;\n"
       },
       "id": "fanout-sa",
       "name": "Fan-out Saved Audiences",
@@ -422,6 +423,110 @@
         880,
         0
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.sa_needs_create === true && $json.dry_run !== true }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-needs-create",
+      "name": "If Needs Create",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        880,
+        850
+      ],
+      "notes": "Route only items needing create AND not in dry-run. Dry-run create requests fall through to If Dry Run (SA) where they're reported as skipped."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v24.0/{{ $json.sa_account_id }}/saved_audiences",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $json.sa_audience_name, description: 'Auto-generated by clinic-manager push-targeting', targeting: { geo_locations: $json.fb_geo_locations.geo_locations, excluded_geo_locations: $json.fb_geo_locations.excluded_geo_locations, age_min: 25, age_max: 65, targeting_optimization: 'none', targeting_relaxation_types: { lookalike: 0, custom_audience: 0 } } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "create-sa",
+      "name": "Create Saved Audience",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        750
+      ],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "JAEtqLx2roZPZJ0G",
+          "name": "Facebook Graph User"
+        }
+      },
+      "notes": "Auto-creates a saved audience named '{Clinic} ({ST})' when no mapping exists for the (clinic, account)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tag the created result so Format Response and the Supabase patch can use it\nconst r = $input.first().json;\nconst src = $('Fan-out Saved Audiences').item.json;\nconst body = r.body || r;\nconst newId = body.id || null;\nconst ok = !!newId;\nreturn [{ json: {\n  clinic_id: src.clinic_id,\n  clinic_name: src.clinic_name,\n  sa_account_id: src.sa_account_id,\n  sa_saved_audience_id: newId,\n  sa_audience_name: src.sa_audience_name,\n  sa_success: ok,\n  sa_created: true,\n  sa_error: ok ? null : (body?.error?.message || `HTTP ${r.statusCode || '?'}`),\n  dry_run: src.dry_run\n}}];\n"
+      },
+      "id": "tag-created-sa",
+      "name": "Tag Created SA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://xhyttombqrhqvnycyzlj.supabase.co/rest/v1/rpc/add_clinic_saved_audience",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "Content-Type", "value": "application/json"},
+            {"name": "Prefer", "value": "return=minimal"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_clinic_id: $json.clinic_id, p_account_id: $json.sa_account_id, p_audience_id: $json.sa_saved_audience_id }) }}",
+        "options": {
+          "response": {"response": {"neverError": true}}
+        }
+      },
+      "id": "patch-sa-ids",
+      "name": "Patch Saved Audience IDs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        750
+      ],
+      "credentials": {
+        "supabaseApi": {
+          "id": "9wxMVkfSJBYoL43Q",
+          "name": "Supabase account"
+        }
+      },
+      "notes": "Atomic jsonb merge via RPC so concurrent creates for the same clinic don't clobber each other."
     }
   ],
   "pinData": {},
@@ -541,7 +646,58 @@
       "main": [
         [
           {
+            "node": "If Needs Create",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Needs Create": {
+      "main": [
+        [
+          {
+            "node": "Create Saved Audience",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "If Dry Run (SA)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Saved Audience": {
+      "main": [
+        [
+          {
+            "node": "Tag Created SA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag Created SA": {
+      "main": [
+        [
+          {
+            "node": "Patch Saved Audience IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Patch Saved Audience IDs": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
             "type": "main",
             "index": 0
           }

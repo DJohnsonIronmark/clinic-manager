@@ -112,6 +112,18 @@ export default function ClinicTerritoryManager() {
   } | null>(null);
   const [pushTargetingMode, setPushTargetingMode] = useState<'single' | 'batch' | 'all'>('single');
   const [selectedClinicIds, setSelectedClinicIds] = useState<Set<string>>(new Set());
+  const FB_AD_ACCOUNTS: Array<{ id: string; label: string }> = [
+    { id: 'act_10201019819851931', label: 'Account 1 (10201019819851931)' },
+    { id: 'act_708812601077037', label: 'Account 2 (708812601077037)' },
+    { id: 'act_293603336988341', label: 'Account 3 (293603336988341)' },
+    { id: 'act_3684421665103341', label: 'Account 4 (3684421665103341)' },
+    { id: 'act_249137098153238', label: 'Account 5 (249137098153238)' },
+    { id: 'act_1738224836936889', label: 'Account 6 (1738224836936889)' },
+    { id: 'act_1093083055897528', label: 'Account 7 (1093083055897528)' },
+  ];
+  const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(
+    new Set(FB_AD_ACCOUNTS.map(a => a.id))
+  );
 
   const mapContainer = useRef<HTMLDivElement>(null);
   const editChatRef = useRef<HTMLDivElement>(null);
@@ -1672,12 +1684,19 @@ User request: ${userMessage}`;
     setPushTargetingResult(null);
 
     try {
+      const accountIds = Array.from(selectedAccountIds);
+      if (accountIds.length === 0) {
+        setPushTargetingStatus('idle');
+        alert('Select at least one ad account before pushing.');
+        return;
+      }
       const response = await fetch('/api/facebook/push-targeting', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mode,
           clinic_ids: mode !== 'all' ? clinicIds : undefined,
+          account_ids: accountIds,
         }),
       });
 
@@ -2310,8 +2329,44 @@ User request: ${userMessage}`;
                     )}
                   </p>
                   <p className="text-sm text-amber-600 bg-amber-50 p-3 rounded-lg mb-4">
-                    This will replace the location targeting on all active ad sets in matching campaigns. Non-location targeting (age, interests, platforms) will be preserved.
+                    This will replace the location targeting on all active ad sets in matching campaigns. Non-location targeting (age, interests, platforms) will be preserved. Saved audiences will be auto-created in any selected account that doesn't already have one for this clinic.
                   </p>
+                  <div className="mb-4">
+                    <p className="text-sm font-semibold text-gray-700 mb-2">Ad accounts to push to:</p>
+                    <div className="space-y-1 max-h-48 overflow-y-auto border border-gray-200 rounded-lg p-2">
+                      {FB_AD_ACCOUNTS.map(acct => (
+                        <label key={acct.id} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-gray-50 px-2 py-1 rounded">
+                          <input
+                            type="checkbox"
+                            checked={selectedAccountIds.has(acct.id)}
+                            onChange={() => {
+                              setSelectedAccountIds(prev => {
+                                const next = new Set(prev);
+                                if (next.has(acct.id)) next.delete(acct.id);
+                                else next.add(acct.id);
+                                return next;
+                              });
+                            }}
+                          />
+                          <span>{acct.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="flex gap-2 mt-2 text-xs">
+                      <button
+                        onClick={() => setSelectedAccountIds(new Set(FB_AD_ACCOUNTS.map(a => a.id)))}
+                        className="text-blue-600 hover:underline"
+                      >
+                        Select all
+                      </button>
+                      <button
+                        onClick={() => setSelectedAccountIds(new Set())}
+                        className="text-blue-600 hover:underline"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
                   <div className="flex gap-3">
                     <button
                       onClick={() => {
@@ -2324,7 +2379,8 @@ User request: ${userMessage}`;
                     </button>
                     <button
                       onClick={() => pushTargetingToFacebook(pushTargetingMode)}
-                      className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                      disabled={selectedAccountIds.size === 0}
+                      className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400"
                     >
                       Confirm Push
                     </button>
