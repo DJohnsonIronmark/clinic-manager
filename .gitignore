@@ -33,3 +33,11 @@ yarn-error.log*
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local working state — not project code
+.claude-flow/
+/backups/
+
+# Local working files at repo root (sensitive client data / binaries)
+/tjc_*.csv
+/*.docx

@@ -1,11 +1,25 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
+export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
+
 // Use anon client for public data - no cookies needed
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY!
 );
+
+// Canonical clinic_id form: strip leading zeros from purely-numeric IDs so
+// '05012' and 5012 (bigint) both key to '5012'. Non-numeric IDs pass through
+// unchanged. Fixes a bug where Norwalk ('05012' in clinic_territories vs
+// 5012 in TJC Locations GeoCoded) failed the merge join and rendered at 0,0.
+function normalizeClinicId(raw: unknown): string {
+  const s = String(raw ?? '').trim();
+  if (s === '') return '';
+  return /^\d+$/.test(s) ? String(parseInt(s, 10)) : s;
+}
 
 // Fetch all rows by paginating in chunks to bypass 1000 row limit.
 // orderBy is required — without a stable sort, Postgres may return rows in
@@ -45,15 +59,15 @@ export async function GET() {
 
     console.log('Fetched:', territories.length, 'territories,', locations.length, 'locations');
 
-    // Merge the data - convert IDs to strings for consistent lookup
+    // Merge the data - normalize IDs to a canonical form for consistent lookup
     const locById: Record<string, Record<string, unknown>> = {};
     locations.forEach((loc) => {
-      const id = String(loc.ClinicID || '');
+      const id = normalizeClinicId(loc.ClinicID);
       if (id) locById[id] = loc;
     });
 
     const merged = territories.map((t) => {
-      const id = String(t.clinic_id || '');
+      const id = normalizeClinicId(t.clinic_id);
       const loc = id ? locById[id] : null;
       return {
         clinic_id: id,

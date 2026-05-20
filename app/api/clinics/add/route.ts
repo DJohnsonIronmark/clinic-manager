@@ -118,10 +118,21 @@ function extractCityState(placeName: string): { city: string; state: string } {
   return { city, state };
 }
 
+// Canonical clinic_id form: strip leading zeros from numeric IDs so the
+// text column in clinic_territories stays aligned with the bigint ClinicID
+// in TJC Locations GeoCoded. Without this, '05012' and 5012 fail to join
+// in /api/clinics and the map renders the clinic at 0,0.
+function normalizeClinicId(raw: unknown): string {
+  const s = String(raw ?? '').trim();
+  if (s === '') return '';
+  return /^\d+$/.test(s) ? String(parseInt(s, 10)) : s;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { clinic_name, clinic_id, address, resolve_overlaps } = body;
+    const { clinic_name, address, resolve_overlaps } = body;
+    const clinic_id = normalizeClinicId(body.clinic_id);
 
     if (!clinic_name || !clinic_id || !address) {
       return NextResponse.json(
