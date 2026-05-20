@@ -1,0 +1,100 @@
+state,clinic_id,clinic_name,metro_type,reason
+Arizona,48018,7th Ave. & McDowell,urban,regen
+Arizona,48011,Arcadia,urban,regen
+Arizona,48016,Arrowhead Ranch,urban,regen
+Arizona,48005,Camelback,urban,regen
+Arizona,48040,Chandler - Ahwatukee,urban,regen
+Arizona,48007,Dana Park,urban,regen
+Arizona,48042,East Mesa,urban,regen
+Arizona,48010,McDowell Mountain Ranch,urban,regen
+Arizona,48006,Moon Valley,urban,regen
+Arizona,48022,Norterra,urban,regen
+Arizona,48017,Ocotillo,urban,regen
+Arizona,48041,Tempe Marketplace,urban,regen
+Arizona,48009,Tempe Shops,urban,regen
+California,31087,Almaden Ranch,urban,regen
+California,31254,Blue Oaks,urban,regen
+California,31084,Brokaw Plaza,urban,regen
+California,31096,Calvine Pointe,urban,regen
+California,31075,Camden Park,urban,regen
+California,31088,Citrus Heights,urban,regen
+California,31093,Crocker Village,urban,regen
+California,31240,Daly City,urban,regen
+California,31078,Delta Shores,urban,regen
+California,31074,Elk Grove Commons,urban,regen
+California,31081,Folsom,urban,regen
+California,31076,Gold River,urban,regen
+California,31073,Loehmann's Plaza,urban,regen
+California,31092,McCarthy Ranch,urban,regen
+California,31086,Midtown R Street,urban,regen
+California,31085,Natomas,urban,regen
+California,31080,Nugget Plaza,urban,regen
+California,31059,Pinole,urban,regen
+California,31253,Plaza de San Jose,urban,regen
+California,31077,Renaissance Creek,urban,regen
+California,31090,Rocklin,urban,regen
+California,31239,San Francisco Lakeshore,urban,regen
+California,31264,San Mateo,urban,regen
+California,31082,The Plant,urban,regen
+California,31089,West Sacramento,urban,regen
+California,31091,Westgate West,urban,regen
+Georgia,4026,Alpharetta at Windward Plaza,suburban,flip+regen
+Georgia,4021,Brookhaven,urban,regen
+Georgia,4012,Buckhead,urban,regen
+Georgia,4038,Dunwoody,suburban,flip+regen
+Georgia,4076,Fayetteville GA,suburban,flip+regen
+Georgia,4063,McDonough,suburban,flip+regen
+Georgia,4030,Newnan,suburban,flip+regen
+Georgia,4028,Roswell,suburban,flip+regen
+Georgia,4025,Sandy Springs,suburban,flip+regen
+Illinois,21017,Aurora-Orchard Road,urban,regen
+Illinois,21032,Darien,urban,regen
+Kansas,34008,Olathe,urban,regen
+Kansas,34006,Overland Park,urban,regen
+Kansas,34010,Prairie Village,urban,regen
+Kansas,34009,Shawnee,urban,regen
+Massachusetts,6010,Dedham,urban,regen
+Massachusetts,6012,Easton,urban,regen
+Michigan,26012,Allen Park,urban,regen
+Michigan,26007,Livonia,urban,regen
+Michigan,26003,Royal Oak,urban,regen
+Michigan,26004,Troy Marketplace,urban,regen
+Minnesota,32007,Apple Valley,urban,regen
+Minnesota,32008,Bloomington,urban,regen
+Minnesota,32010,Burnsville,urban,regen
+Minnesota,32006,Eagan,urban,regen
+Minnesota,32009,Maple Grove,urban,regen
+Minnesota,32011,Uptown,urban,regen
+Missouri,24026,Festus,urban,regen
+Missouri,24021,Tiffany Springs,urban,regen
+Missouri,24016,Wentzville,suburban,regen
+New Jersey,3018,Wall Township,urban,regen
+New York,11032,New Rochelle,urban,regen
+New York,11025,Westbury,urban,regen
+North Carolina,12009,Mallard Creek,urban,regen
+North Carolina,12041,Mooresville,urban,regen
+North Carolina,12037,Mountain Island,urban,regen
+Ohio,17008,Parma,urban,regen
+Pennsylvania,20003,Newtown Square,urban,regen
+Tennessee,16028,Bellevue,suburban,regen
+Tennessee,16001,Brentwood,suburban,regen
+Tennessee,16032,Cleveland,urban,regen
+Tennessee,16003,Cool Springs,suburban,regen
+Tennessee,16039,Gallatin,suburban,regen
+Tennessee,16027,Goodlettsville,suburban,regen
+Tennessee,16026,Hendersonville,suburban,regen
+Tennessee,16021,Hermitage,urban,regen
+Tennessee,16004,Mt. Juliet,suburban,regen
+Tennessee,16023,Smyrna,suburban,regen
+Texas,28077,Alamo Ranch,urban,regen
+Texas,28063,Alon Town Centre,urban,regen
+Texas,28064,DeZavala at I-10,urban,regen
+Texas,28174,Kyle,urban,regen
+Texas,28062,Mueller,urban,regen
+Texas,28126,Potranco,urban,regen
+Texas,28061,Southpark Meadows,urban,regen
+Texas,28125,The Rim,urban,regen
+Washington,42012,Federal Way,urban,regen
+Washington,42030,Milton,urban,regen
+Washington,42010,University Place,urban,regen
+Washington,42020,West Seattle,urban,regen
