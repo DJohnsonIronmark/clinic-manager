@@ -2023,6 +2023,15 @@ User request: ${userMessage}`;
                     <DownloadIcon />
                     {saveStatus && saveStatus !== 'success' && saveStatus !== 'error' ? saveStatus : 'Export FB Targeting'}
                   </button>
+                  <a
+                    href={`/api/tiktok/zip-export?clinic_id=${encodeURIComponent(selectedClinic.clinic_id)}&buffer_miles=5&format=txt`}
+                    download
+                    title="ZIP codes touching the territory or the 5-mile ring around it — one per line, paste into TikTok location targeting"
+                    className="w-full flex items-center justify-center gap-2 bg-gray-900 text-white px-4 py-2 rounded-lg hover:bg-black"
+                  >
+                    <DownloadIcon />
+                    Export TikTok ZIPs (5 mi)
+                  </a>
                   <button
                     onClick={() => {
                       setPushTargetingMode('single');
