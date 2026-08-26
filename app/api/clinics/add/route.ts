@@ -1,23 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServiceClient } from '@/lib/supabase/service';
+import {
+  driveTimeRings,
+  ISOCHRONE_CONTOURS_MINUTES,
+  selectIsochrone,
+  type IsochroneFeature,
+} from '@/lib/territory/isochrones';
+import { resolveTerritoryCluster, summarizeCluster, targetingRegenerationIds } from '@/lib/territory/resolve';
+import { regenerateFbTargeting, type RegenResult } from '@/lib/fb-targeting/regenerate';
+
+export const dynamic = 'force-dynamic';
+// Two Mapbox calls + an atomic cluster resolution (~0.5 s) + targeting
+// generation. Well under this, but the default is too tight for cold starts.
+export const maxDuration = 60;
 
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY!;
 
 interface GeocodeResult {
   center: [number, number];
   place_name: string;
-}
-
-interface IsochroneFeature {
-  type: 'Feature';
-  geometry: {
-    type: 'Polygon' | 'MultiPolygon';
-    coordinates: number[][][] | number[][][][];
-  };
-  properties: {
-    contour: number;
-  };
 }
 
 // Geocode an address using Mapbox
@@ -42,12 +43,9 @@ async function geocodeAddress(address: string): Promise<GeocodeResult | null> {
   };
 }
 
-// Generate isochrones using Mapbox Isochrone API
+// Generate drive-time isochrones using Mapbox Isochrone API
 async function generateIsochrones(lng: number, lat: number): Promise<IsochroneFeature[] | null> {
-  // Generate 10, 15, 20, 30 minute drive-time isochrones
-  const minutes = [30, 20, 15, 10];
-  const contours = minutes.join(',');
-
+  const contours = ISOCHRONE_CONTOURS_MINUTES.join(',');
   const url = `https://api.mapbox.com/isochrone/v1/mapbox/driving/${lng},${lat}?contours_minutes=${contours}&polygons=true&access_token=${MAPBOX_TOKEN}`;
 
   const response = await fetch(url);
@@ -128,11 +126,25 @@ function normalizeClinicId(raw: unknown): string {
   return /^\d+$/.test(s) ? String(parseInt(s, 10)) : s;
 }
 
+function targetingSummary(results: RegenResult[]): string {
+  const regenerated = results.filter(r => r.status === 'regenerated').map(r => r.clinic_name ?? r.clinic_id);
+  const live = results.filter(r => r.status === 'skipped_live_in_meta').map(r => r.clinic_name ?? r.clinic_id);
+  const failed = results.filter(r => r.status === 'error').map(r => `${r.clinic_name ?? r.clinic_id} (${r.detail})`);
+  const parts: string[] = [];
+  if (regenerated.length) parts.push(`Meta targeting generated for ${regenerated.join(', ')}.`);
+  if (live.length) parts.push(`NOT regenerated (live in Meta, re-push deliberately): ${live.join(', ')}.`);
+  if (failed.length) parts.push(`Targeting failed for ${failed.join('; ')}.`);
+  return parts.join(' ');
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { clinic_name, address, resolve_overlaps } = body;
+    const { clinic_name, address } = body;
     const clinic_id = normalizeClinicId(body.clinic_id);
+    // Default on: a clinic added without resolution is a clinic that overlaps
+    // its neighbors until someone notices. Pass false to skip explicitly.
+    const resolveOverlaps = body.resolve_overlaps !== false;
 
     if (!clinic_name || !clinic_id || !address) {
       return NextResponse.json(
@@ -140,6 +152,8 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const supabase = getServiceClient();
 
     // Step 1: Geocode the address
     const geocodeResult = await geocodeAddress(address);
@@ -162,32 +176,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Step 3: Determine metro type and select appropriate isochrone
+    // Step 3: Determine metro type and select the territory contour by its
+    // `contour` minutes (urban 15 / suburban 20 / rural 30), not array index.
     const metro_type = determineMetroType(state, city);
-
-    // Create FeatureCollection for raw_geojson (all isochrones)
-    const rawGeojson = {
-      type: 'FeatureCollection',
-      features: isochrones
-    };
-
-    // Select the appropriate isochrone based on metro type
-    // Index: 0=30min, 1=20min, 2=15min, 3=10min
-    const isochroneIndex = metro_type === 'urban' ? 2 : metro_type === 'rural' ? 0 : 1;
-    const selectedIsochrone = isochrones[isochroneIndex]?.geometry || isochrones[0]?.geometry;
+    const selectedIsochrone = selectIsochrone(isochrones, metro_type);
+    if (!selectedIsochrone) {
+      return NextResponse.json(
+        { error: 'Drive-time response contained no usable polygon.' },
+        { status: 500 }
+      );
+    }
 
     // Step 4: Check if clinic_id already exists
-    const checkResponse = await fetch(
-      `${SUPABASE_URL}/rest/v1/clinic_territories?clinic_id=eq.${clinic_id}&select=clinic_id`,
-      {
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-        }
-      }
-    );
-
-    const existing = await checkResponse.json();
+    const { data: existing, error: existErr } = await supabase
+      .from('clinic_territories')
+      .select('clinic_id')
+      .eq('clinic_id', clinic_id)
+      .limit(1);
+    if (existErr) {
+      return NextResponse.json({ error: `Lookup failed: ${existErr.message}` }, { status: 500 });
+    }
     if (existing && existing.length > 0) {
       return NextResponse.json(
         { error: `Clinic ID ${clinic_id} already exists` },
@@ -195,158 +203,143 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Step 5: Insert into clinic_territories
-    const insertResponse = await fetch(
-      `${SUPABASE_URL}/rest/v1/clinic_territories`,
-      {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=representation'
-        },
-        body: JSON.stringify({
-          clinic_id,
-          clinic_name,
-          city,
-          state,
-          metro_type,
-          raw_geojson: rawGeojson
-        })
-      }
-    );
-
-    if (!insertResponse.ok) {
-      const errorText = await insertResponse.text();
-      console.error('Insert failed:', errorText);
-      return NextResponse.json(
-        { error: `Failed to create clinic: ${errorText}` },
-        { status: 500 }
-      );
-    }
-
-    // Step 6: Update the geom column with the selected isochrone
-    const geomResponse = await fetch(
-      `${SUPABASE_URL}/rest/v1/rpc/update_clinic_geom`,
-      {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          p_clinic_id: clinic_id,
-          p_geojson: JSON.stringify(selectedIsochrone)
-        })
-      }
-    );
-
-    if (!geomResponse.ok) {
-      console.error('Geom update failed:', await geomResponse.text());
-      // Continue anyway - the raw_geojson is saved
-    }
-
-    // Step 7: Also insert into TJC Locations GeoCoded table
-    const locationResponse = await fetch(
-      `${SUPABASE_URL}/rest/v1/TJC Locations GeoCoded`,
-      {
-        method: 'POST',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=minimal'
-        },
-        body: JSON.stringify({
-          ClinicID: clinic_id,
-          Name: clinic_name,
-          Address: address,
-          City: city,
-          State: stateToCode(state),
-          latitude: lat,
-          longitude: lng
-        })
-      }
-    );
-
-    if (!locationResponse.ok) {
-      console.error('Location insert warning:', await locationResponse.text());
-      // Continue - main record was created
-    }
-
-    // Step 8: Resolve overlaps if requested
-    let overlapsResolved = 0;
-    if (resolve_overlaps && state) {
-      try {
-        // Run overlap resolution for the state where the new clinic was added
-        let batchCount = 0;
-        const maxBatches = 20;
-        const batchSize = 5;
-
-        while (batchCount < maxBatches) {
-          batchCount++;
-
-          const overlapResponse = await fetch(
-            `${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_with_buffer`,
-            {
-              method: 'POST',
-              headers: {
-                'apikey': SUPABASE_KEY,
-                'Authorization': `Bearer ${SUPABASE_KEY}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                p_state: state,
-                p_batch_size: batchSize,
-                p_buffer_miles: 2.0
-              })
-            }
-          );
-
-          if (overlapResponse.ok) {
-            const results = await overlapResponse.json();
-            // Count only successfully updated clinics
-            const resolved = Array.isArray(results)
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              ? results.filter((r: any) => r[1] === true).length
-              : 0;
-            const totalProcessed = Array.isArray(results) ? results.length : 0;
-            overlapsResolved += resolved;
-
-            // Stop if no clinics were processed or batch is incomplete
-            if (totalProcessed === 0 || totalProcessed < batchSize) {
-              break;
-            }
-
-            // Small delay between batches
-            await new Promise(r => setTimeout(r, 200));
-          } else {
-            console.error('Overlap resolution batch failed:', await overlapResponse.text());
-            break;
-          }
-        }
-      } catch (overlapError) {
-        console.error('Overlap resolution error:', overlapError);
-        // Continue - clinic was created, overlap resolution is secondary
-      }
-    }
-
-    return NextResponse.json({
-      success: true,
-      clinic: {
+    // Step 5: Insert into clinic_territories. drive_time_rings is the same
+    // contour set as raw_geojson, stored as an array of Features (largest
+    // first) because the Meta push and map presets read it directly.
+    const { error: insertErr } = await supabase
+      .from('clinic_territories')
+      .insert({
         clinic_id,
         clinic_name,
         city,
         state,
         metro_type,
+        raw_geojson: { type: 'FeatureCollection', features: isochrones },
+        drive_time_rings: driveTimeRings(isochrones),
+      });
+    if (insertErr) {
+      console.error('Insert failed:', insertErr.message);
+      return NextResponse.json(
+        { error: `Failed to create clinic: ${insertErr.message}` },
+        { status: 500 }
+      );
+    }
+
+    // Step 6: Set the geom column to the selected isochrone. The geojson column
+    // is generated from geom, so this is what the map renders.
+    const { error: geomErr } = await supabase.rpc('update_clinic_geom', {
+      p_clinic_id: clinic_id,
+      p_geojson: JSON.stringify(selectedIsochrone.geometry),
+    });
+    if (geomErr) {
+      console.error('Geom update failed:', geomErr.message);
+      return NextResponse.json(
+        {
+          error: `Clinic row created but territory geometry failed: ${geomErr.message}. Re-run "Rebuild" for clinic ${clinic_id}.`,
+          clinic_created: true,
+          clinic_id,
+        },
+        { status: 500 }
+      );
+    }
+
+    // Step 7: Insert into TJC Locations GeoCoded. Required, not optional: the
+    // Voronoi cell used for overlap resolution is computed from this point.
+    const { error: locErr } = await supabase
+      .from('TJC Locations GeoCoded')
+      .insert({
+        ClinicID: clinic_id,
+        Name: clinic_name,
+        Address: address,
+        City: city,
+        State: stateToCode(state),
         latitude: lat,
         longitude: lng,
-        address: geocodeResult.place_name
+      });
+    if (locErr) {
+      console.error('Location insert failed:', locErr.message);
+      return NextResponse.json(
+        {
+          error: `Clinic territory created but location row failed: ${locErr.message}. Overlaps were NOT resolved.`,
+          clinic_created: true,
+          clinic_id,
+        },
+        { status: 500 }
+      );
+    }
+
+    const clinic = {
+      clinic_id,
+      clinic_name,
+      city,
+      state,
+      metro_type,
+      latitude: lat,
+      longitude: lng,
+      address: geocodeResult.place_name,
+    };
+
+    if (!resolveOverlaps) {
+      return NextResponse.json({
+        success: true,
+        clinic,
+        overlaps: null,
+        targeting: [],
+        message: `Clinic "${clinic_name}" created with ${metro_type} drive-time boundaries. Overlap resolution skipped by request.`,
+      });
+    }
+
+    // Step 8: Resolve overlaps for this clinic's cluster — atomic, scoped to
+    // the new clinic plus everyone it really overlaps. A failure here is a
+    // failure of the add: the clinic exists but its territory is wrong, and
+    // the response says so instead of reporting success.
+    let cluster;
+    try {
+      cluster = await resolveTerritoryCluster(supabase, { seedIds: [clinic_id] });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error('Overlap resolution failed:', detail);
+      return NextResponse.json(
+        {
+          error: `Clinic "${clinic_name}" was created, but overlap resolution failed: ${detail}. Use Analyze/Resolve Overlaps for ${state} to retry.`,
+          clinic_created: true,
+          clinic,
+        },
+        { status: 502 }
+      );
+    }
+    const overlaps = summarizeCluster(cluster);
+
+    // Step 9: Regenerate Meta targeting for the new clinic and every neighbor
+    // whose territory changed. Derivative of the territory, so a failure here
+    // is reported but does not fail the add.
+    let targeting: RegenResult[] = [];
+    let targetingError: string | null = null;
+    try {
+      targeting = await regenerateFbTargeting(supabase, targetingRegenerationIds(cluster, [clinic_id]));
+    } catch (e) {
+      targetingError = e instanceof Error ? e.message : String(e);
+      console.error('Targeting regeneration failed:', targetingError);
+    }
+
+    const messageParts = [
+      `Clinic "${clinic_name}" created with ${metro_type} drive-time boundaries.`,
+      overlaps.message,
+      targetingSummary(targeting),
+      targetingError ? `Targeting generation failed: ${targetingError}.` : '',
+    ].filter(Boolean);
+
+    return NextResponse.json({
+      success: true,
+      clinic,
+      overlaps: {
+        total: overlaps.total,
+        changed: overlaps.changed.length,
+        cluster,
       },
-      overlaps_resolved: overlapsResolved,
-      message: `Clinic "${clinic_name}" created successfully with ${metro_type} drive-time boundaries.${overlapsResolved > 0 ? ` Resolved ${overlapsResolved} territory overlaps.` : ''}`
+      targeting,
+      targeting_error: targetingError,
+      message: messageParts.join(' '),
     });
 
   } catch (error) {

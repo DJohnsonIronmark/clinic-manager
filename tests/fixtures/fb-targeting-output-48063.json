@@ -1,0 +1,191 @@
+{
+  "clinic_id": "48063",
+  "clinic_name": "Hunt Highway",
+  "geo_locations": {
+    "location_types": [
+      "home",
+      "recent"
+    ],
+    "custom_locations": [
+      {
+        "name": "33.180380, -111.582456",
+        "radius": 1,
+        "latitude": 33.18038,
+        "longitude": -111.582456,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.229769, -111.547820",
+        "radius": 1,
+        "latitude": 33.22976852173914,
+        "longitude": -111.547820306047,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.210942, -111.586782",
+        "radius": 1,
+        "latitude": 33.210942434782616,
+        "longitude": -111.58678156627938,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.210942, -111.560807",
+        "radius": 1,
+        "latitude": 33.210942434782616,
+        "longitude": -111.56080739279113,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.229769, -111.573794",
+        "radius": 1,
+        "latitude": 33.22976852173914,
+        "longitude": -111.57379447953525,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.248595, -111.534833",
+        "radius": 1,
+        "latitude": 33.24859460869566,
+        "longitude": -111.53483321930288,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.154464, -111.599769",
+        "radius": 1,
+        "latitude": 33.15446417391305,
+        "longitude": -111.5997686530235,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.173290, -111.612756",
+        "radius": 1,
+        "latitude": 33.17329026086957,
+        "longitude": -111.61275573976764,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.248595, -111.560807",
+        "radius": 1,
+        "latitude": 33.24859460869566,
+        "longitude": -111.56080739279113,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.135638, -111.612756",
+        "radius": 1,
+        "latitude": 33.135638086956526,
+        "longitude": -111.61275573976764,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.210942, -111.612756",
+        "radius": 1,
+        "latitude": 33.210942434782616,
+        "longitude": -111.61275573976764,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.192116, -111.625743",
+        "radius": 1,
+        "latitude": 33.192116347826094,
+        "longitude": -111.62574282651175,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.154464, -111.625743",
+        "radius": 1,
+        "latitude": 33.15446417391305,
+        "longitude": -111.62574282651175,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.229769, -111.521846",
+        "radius": 1,
+        "latitude": 33.22976852173914,
+        "longitude": -111.52184613255875,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "33.192116, -111.599769",
+        "radius": 1,
+        "latitude": 33.192116347826094,
+        "longitude": -111.5997686530235,
+        "distance_unit": "mile"
+      }
+    ]
+  },
+  "excluded_geo_locations": {
+    "custom_locations": [
+      {
+        "name": "Southwest",
+        "radius": 45,
+        "latitude": 32.55949615198116,
+        "longitude": -112.32429546008673,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "Southeast",
+        "radius": 45,
+        "latitude": 32.55949615198116,
+        "longitude": -110.84061653991326,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "Northwest",
+        "radius": 45,
+        "latitude": 33.80126384801884,
+        "longitude": -112.32429546008673,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "Northeast",
+        "radius": 45,
+        "latitude": 33.80126384801884,
+        "longitude": -110.84061653991326,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "South",
+        "radius": 30,
+        "latitude": 32.44711256025049,
+        "longitude": -111.582456,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "West",
+        "radius": 30,
+        "latitude": 33.18038,
+        "longitude": -112.45857272189359,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "North",
+        "radius": 30,
+        "latitude": 33.91364743974951,
+        "longitude": -111.582456,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "East",
+        "radius": 30,
+        "latitude": 33.18038,
+        "longitude": -110.7063392781064,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "San Tan Valley clinic",
+        "radius": 1,
+        "latitude": 33.1628442,
+        "longitude": -111.5626017,
+        "distance_unit": "mile"
+      },
+      {
+        "name": "Queen Creek clinic",
+        "radius": 1,
+        "latitude": 33.2520516,
+        "longitude": -111.638285,
+        "distance_unit": "mile"
+      }
+    ]
+  }
+}

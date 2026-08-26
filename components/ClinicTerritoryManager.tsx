@@ -614,15 +614,11 @@ export default function ClinicTerritoryManager() {
     setSaveStatus('Loading isochrone...');
 
     try {
-      // Fetch the clinic's raw_geojson which contains all isochrones
+      // Fetch the clinic's raw_geojson which contains all isochrones.
+      // Server route: clinic_territories is RLS-locked, so a browser-side
+      // PostgREST call with the anon key returns nothing.
       const response = await fetch(
-        `${SUPABASE_URL}/rest/v1/clinic_territories?clinic_id=eq.${selectedClinic.clinic_id}&select=raw_geojson`,
-        {
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-          }
-        }
+        `/api/territories/raw-geojson?clinic_id=${encodeURIComponent(selectedClinic.clinic_id)}`
       );
 
       if (!response.ok) {
@@ -1739,19 +1735,14 @@ User request: ${userMessage}`;
     setOverlapAnalysis(null);
 
     try {
-      const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/analyze_overlaps`, {
+      const response = await fetch('/api/overlaps/analyze', {
         method: 'POST',
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ target_state: state || null })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state: state || null })
       });
 
       if (response.ok) {
-        const data = await response.json();
-        const result = Array.isArray(data) ? data[0] : data;
+        const result = await response.json();
 
         if (result) {
           setOverlapAnalysis(result);
@@ -1778,57 +1769,42 @@ User request: ${userMessage}`;
     }
 
     const totalOverlaps = overlapAnalysis.total_overlaps;
-    const batchSize = 5;
 
-    if (!confirm(`Resolve ~${totalOverlaps} overlaps for ${state || 'ALL STATES'}?`)) {
+    if (!state) {
+      alert('Pick a state first — resolution runs one state at a time.');
+      return;
+    }
+    if (!confirm(`Resolve ~${totalOverlaps} overlaps for ${state}? Meta targeting will be regenerated for every clinic whose territory changes (clinics already pushed to Meta are skipped and listed).`)) {
       return;
     }
 
     setSaveStatus('resolving');
-    let totalResolved = 0;
-    let batchCount = 0;
 
     try {
-      while (batchCount < 50) {
-        batchCount++;
-
-        const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/resolve_overlaps_with_buffer`, {
-          method: 'POST',
-          headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            p_state: state || null,
-            p_batch_size: batchSize,
-            p_buffer_miles: 2.0
-          })
-        });
-
-        if (response.ok) {
-          const results = await response.json();
-          // Count only successfully updated clinics (where second element is true)
-          const resolved = Array.isArray(results)
-            ? results.filter((r: [string, boolean, string]) => r[1] === true).length
-            : 0;
-          const totalProcessed = Array.isArray(results) ? results.length : 0;
-          totalResolved += resolved;
-
-          setSaveStatus(`resolving (${totalResolved} updated)`);
-
-          // Stop if no clinics were processed or batch is incomplete
-          if (totalProcessed === 0 || totalProcessed < batchSize) {
-            break;
-          }
-
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } else {
-          throw new Error(`Batch ${batchCount} failed`);
-        }
+      // One atomic call: the server resolves the whole cluster of real
+      // overlaps (rebuild Voronoi cells -> clip -> verify) and regenerates
+      // targeting. No client-side batching — the old loop re-processed the
+      // same abutting clinics every batch and never converged.
+      const response = await fetch('/api/overlaps/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state })
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.details || result.error || 'Resolve failed');
       }
 
-      alert(`Resolved ${totalResolved} overlaps!`);
+      const live = (result.targeting || [])
+        .filter((t: { status: string }) => t.status === 'skipped_live_in_meta')
+        .map((t: { clinic_name?: string; clinic_id: string }) => t.clinic_name || t.clinic_id);
+      const regenerated = (result.targeting || [])
+        .filter((t: { status: string }) => t.status === 'regenerated').length;
+
+      alert(
+        `${result.message}\n\nMeta targeting regenerated: ${regenerated}.` +
+        (live.length ? `\nLive in Meta, NOT regenerated (re-push deliberately): ${live.join(', ')}` : '')
+      );
       setSaveStatus('');
       setShowOverlapPanel(false);
       setTimeout(() => loadClinics(), 1000);
