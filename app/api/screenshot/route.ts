@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServiceKey } from '@/lib/supabase/service';
 
 interface Clinic {
   clinic_id: string;
@@ -82,7 +83,7 @@ export async function GET(request: NextRequest) {
   }
 
   const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY!;
+  const SUPABASE_KEY = getServiceKey();
   const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN!;
 
   try {

@@ -86,8 +86,8 @@ export async function POST(request: NextRequest) {
     // Validate API keys
     const anthropicKey = process.env.ANTHROPIC_API_KEY;
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    // Use service role key for write operations
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY;
+    // Service role for reads and writes (tables are RLS-locked); no public-key fallback
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
     if (!anthropicKey) {
       return NextResponse.json(

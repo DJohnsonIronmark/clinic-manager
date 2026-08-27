@@ -1,15 +1,15 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { getServiceClient } from '@/lib/supabase/service';
 
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
 export const revalidate = 0;
 
-// Use anon client for public data - no cookies needed
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_KEY!
-);
+// Service role, server-side: both tables are RLS-locked with no anon policies,
+// so the previous anon client returned an empty list (the map showed no
+// clinics). Created per request so a missing env var fails the request loudly
+// rather than the build.
+const db = () => getServiceClient();
 
 // Canonical clinic_id form: strip leading zeros from purely-numeric IDs so
 // '05012' and 5012 (bigint) both key to '5012'. Non-numeric IDs pass through
@@ -32,7 +32,7 @@ async function fetchAllRows(table: string, columns: string, orderBy: string): Pr
   const pageSize = 1000;
 
   while (true) {
-    const { data, error } = await supabase
+    const { data, error } = await db()
       .from(table)
       .select(columns)
       .order(orderBy, { ascending: true })
