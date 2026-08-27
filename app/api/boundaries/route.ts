@@ -1,9 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { getServiceClient } from '@/lib/supabase/service';
 
+export const dynamic = 'force-dynamic';
+
+// Service role, server-side: clinic_territories is RLS-locked with no
+// policies for anon or authenticated, so the previous session-scoped client
+// returned zero boundaries. Access to this route is gated by the deployment
+// (Vercel SSO), not by RLS.
 export async function GET(request: NextRequest) {
   try {
-    const supabase = await createClient();
+    const supabase = getServiceClient();
     const searchParams = request.nextUrl.searchParams;
     const offset = parseInt(searchParams.get('offset') || '0');
     const limit = parseInt(searchParams.get('limit') || '50');

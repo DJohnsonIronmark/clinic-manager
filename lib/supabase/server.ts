@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
+import { getServiceClient } from './service';
 
 // Support both env var naming conventions
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -31,11 +32,9 @@ export async function createClient() {
   );
 }
 
-// Service client for admin operations (bypasses RLS)
+// Service client for admin operations (bypasses RLS).
+// Kept for existing imports; delegates to the shared helper so the env name
+// chain (SUPABASE_SERVICE_ROLE, then SUPABASE_SERVICE_ROLE_KEY) lives in one place.
 export function createServiceClient() {
-  const { createClient } = require('@supabase/supabase-js');
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+  return getServiceClient();
 }
