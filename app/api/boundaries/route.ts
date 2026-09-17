@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 
+// Reads live territory data: opt out of Next's Data Cache. Without this, the
+// Supabase client's internal fetch is cached and this route serves stale rows
+// (a metro_type/geometry change in the DB keeps exporting the old polygon).
+// Matches app/api/clinics/route.ts.
+export const dynamic = 'force-dynamic';
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
+
 export async function GET(request: NextRequest) {
   try {
     const supabase = await createClient();
