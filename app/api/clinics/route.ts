@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServiceClient } from '@/lib/supabase/service';
+import type { ManualExclusion } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 export const fetchCache = 'force-no-store';
@@ -53,7 +54,7 @@ export async function GET() {
   try {
     // Fetch both tables with pagination to get ALL rows
     const [territories, locations] = await Promise.all([
-      fetchAllRows('clinic_territories', 'clinic_id,clinic_name,state,city,metro_type', 'clinic_id'),
+      fetchAllRows('clinic_territories', 'clinic_id,clinic_name,state,city,metro_type,fb_manual_exclusions', 'clinic_id'),
       fetchAllRows('TJC Locations GeoCoded', 'ClinicID,Name,Address,City,State,latitude,longitude', 'ClinicID'),
     ]);
 
@@ -77,7 +78,8 @@ export async function GET() {
         address: (loc?.Address || '') as string,
         latitude: parseFloat(String(loc?.latitude ?? 0)),
         longitude: parseFloat(String(loc?.longitude ?? 0)),
-        metro_type: (t.metro_type || 'unknown') as string
+        metro_type: (t.metro_type || 'unknown') as string,
+        fb_manual_exclusions: (Array.isArray(t.fb_manual_exclusions) ? t.fb_manual_exclusions : []) as ManualExclusion[]
       };
     });
 

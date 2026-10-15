@@ -1490,6 +1490,26 @@ User request: ${userMessage}`;
         await new Promise(resolve => setTimeout(resolve, 100));
       }
 
+      // Manual exclusions (airports, hotel clusters, data centers) can't be derived from
+      // geometry, so they're stored per clinic and appended on every export, outside the
+      // 10-point generated cap. Meta's real custom-location limit is far above 25.
+      const manualExclusions = (selectedClinic.fb_manual_exclusions || []).filter(
+        m => Number.isFinite(Number(m.latitude)) && Number.isFinite(Number(m.longitude)) && Number(m.radius) >= 1
+      );
+      for (const m of manualExclusions) {
+        outerLayer.push({
+          name: `${m.name} Exclusion (manual)`,
+          address: m.address || m.name,
+          coordinates: `${Number(m.latitude).toFixed(6)}, ${Number(m.longitude).toFixed(6)}`,
+          latitude: Number(m.latitude),
+          longitude: Number(m.longitude),
+          radius: Math.round(Number(m.radius)),
+          distance_unit: 'mile',
+          layer_type: 'exclude'
+        });
+      }
+      console.log(`Added ${manualExclusions.length} manual exclusions`);
+
       // Sort inclusions and exclusions by radius
       const sortedInclusions = [...innerLayer].sort((a, b) => a.radius - b.radius);
       const sortedExclusions = [...outerLayer].sort((a, b) => a.radius - b.radius);
@@ -1543,8 +1563,8 @@ User request: ${userMessage}`;
       lines.push(`  Include Breakdown: ${includeBreakdown}`);
       lines.push(`  Exclude Radii: ${excludeBreakdownStr}`);
       lines.push(`  Include Points: ${sortedInclusions.length}`);
-      lines.push(`  Exclude Points: ${sortedExclusions.length}`);
-      lines.push(`  Total Points: ${sortedInclusions.length + sortedExclusions.length} / 25 max`);
+      lines.push(`  Exclude Points: ${sortedExclusions.length}${manualExclusions.length ? ` (incl. ${manualExclusions.length} manual)` : ''}`);
+      lines.push(`  Total Points: ${sortedInclusions.length + sortedExclusions.length} (generated cap 25; manual exclusions are extra)`);
       lines.push(`  Target Coverage: >85% | Acceptable Overspill: <25%`);
       lines.push('');
       lines.push('============================================================');
@@ -1593,8 +1613,16 @@ User request: ${userMessage}`;
         lines.push('');
       }
 
+      if (manualExclusions.length) {
+        lines.push('MANUAL EXCLUSIONS (included above; kept on every export)');
+        for (const m of manualExclusions) {
+          lines.push(`  ${Math.round(Number(m.radius))} mi: ${m.name} | ${m.address || ''}${m.reason ? ` | ${m.reason}` : ''}`);
+        }
+        lines.push('');
+      }
+
       lines.push('============================================================');
-      lines.push(`TOTAL POINTS: ${sortedInclusions.length + sortedExclusions.length} / 25`);
+      lines.push(`TOTAL POINTS: ${sortedInclusions.length + sortedExclusions.length}`);
       lines.push('============================================================');
 
       // Persist FB Graph targeting payload to clinic_territories.fb_geo_locations

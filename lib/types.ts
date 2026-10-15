@@ -9,6 +9,16 @@ export interface Clinic {
   raw_geojson?: string | GeoJSONFeature | GeoJSONFeatureCollection | GeoJSONGeometry;
   geojson?: GeoJSONGeometry;  // Corrected boundary from geom column
   metro_type: string;
+  fb_manual_exclusions?: ManualExclusion[];  // Always appended to the FB targeting export
+}
+
+export interface ManualExclusion {
+  name: string;
+  address: string;
+  latitude: number;
+  longitude: number;
+  radius: number;  // miles, Meta minimum is 1
+  reason?: string;
 }
 
 export interface GeoJSONGeometry {
